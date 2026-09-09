@@ -156,7 +156,7 @@ def main(argv: list[str] | None = None) -> int:
                 LOG.info("worker mode: %d conversation(s) in this shard", len(shard_rooms))
                 purger.run_list(shard_rooms)
             elif args.workers > 1:
-                rooms = enumerate_rooms(browser, cfg, audit)
+                rooms = enumerate_rooms(browser, cfg, audit, limit=args.max_rooms)
                 if not rooms:
                     LOG.error("census found no conversations; aborting")
                     return 2

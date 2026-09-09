@@ -43,12 +43,40 @@ A cautious first live run, capped at three deletions:
 .venv/bin/python main.py --execute --max-deletes-total 3 --keep-open -v
 ```
 
-### Scale
+### Scale and parallel runs
 
-A full pass takes roughly **8–10 seconds per conversation**, so an account with ~650
-conversations runs for about 1.5–2 hours. Progress is saved to `state.json` after each
-conversation, so if you stop the run (or it crashes) the next run resumes where it left
-off. `--no-resume` ignores that file and revisits everything.
+A conversation takes roughly **10–12 seconds** (open, scroll back through its history,
+check each image). This account has **801 conversations**, so one window is about
+2.5–3 hours.
+
+To go faster, run several browser windows at once:
+
+```bash
+.venv/bin/python main.py --workers 4 -v
+```
+
+The coordinator takes a one-off census of your conversations, splits them round-robin by
+conversation id, clones your logged-in profile once per worker (Chromium locks a profile
+to one process), and runs them in parallel, printing combined progress every few seconds.
+Four workers bring a full pass to roughly 45 minutes.
+
+Sharding is by **conversation id, not position**. "Worker N skips the first 20×N rows"
+looks simpler but the sidebar is virtualised and lazy-loaded, so a positional offset
+means something different in each window and drifts as rows load — you would get
+duplicated and missed conversations. Ids cannot drift; a test run confirmed the shards
+were disjoint and every conversation was opened exactly once. Workers reach their rooms
+directly at `reddit.com/chat/room/<id>`, so they never depend on sidebar position.
+
+Be conservative with `--workers` when using `--execute`: several windows deleting at once
+is more load on Reddit than a person clicking, and rate limiting is a real risk. Four is
+a reasonable ceiling; start lower if you see failures.
+
+Progress is saved after each conversation (`state.json`, or per-worker state files), so
+an interrupted run resumes where it stopped. `--no-resume` revisits everything.
+
+Single-window runs need no census at all — they take the first unprocessed conversation
+already mounted in the sidebar and start immediately, scrolling for more only when they
+run out.
 
 ## Options
 
@@ -64,6 +92,8 @@ off. `--no-resume` ignores that file and revisits everything.
 | `--state FILE` / `--no-resume` | Progress file for resuming long runs. |
 | `--headless` | No visible window. Note: Reddit's chat app does **not** render headless — use this only if you have verified it works for you. |
 | `--keep-open` | Leave the browser open at the end. |
+| `--workers N` | Run N browser windows in parallel on disjoint shards. |
+| `--census-only FILE` | Write the full conversation list to FILE and exit. |
 | `--inspect` | Dump live page structure and exit (see *When Reddit changes*). |
 | `-v` | Debug detail on the console. The log file always has everything. |
 
@@ -124,10 +154,16 @@ rs-timeline[room] > rs-virtual-scroll-dynamic    <- the timeline IS this element
   rs-timeline-event-menu                         <- hover toolbar: …/Delete|Report
 ```
 
-Two traps worth knowing if you maintain this: `rs-virtual-scroll-dynamic` is itself the
-scrolling element (its wrapper reports `scrollHeight == clientHeight`, which silently
-makes scroll-back a no-op), and every lookup must pierce shadow roots or it finds
-nothing.
+Three traps worth knowing if you maintain this:
+
+* `rs-virtual-scroll-dynamic` is itself the scrolling element. Its wrapper reports
+  `scrollHeight == clientHeight`, so driving the wrapper makes scroll-back a silent no-op.
+* Every lookup must pierce shadow roots or it finds nothing.
+* Navigation and paging are driven by **elements**, not pixel offsets:
+  `element.scrollIntoView()` on the last sidebar row or the oldest message. Pixel
+  arithmetic against a virtualised list skips windows that were never rendered — that bug
+  made a single enumeration pass report anywhere from 387 to 653 of the true 801
+  conversations, varying run to run.
 
 ## When Reddit changes its markup
 
@@ -162,6 +198,8 @@ main.py               CLI, run setup, summary
 rcip/browser.py       persistent Chromium profile, login gate, helper injection
 rcip/purge.py         conversation walk, scroll-back, ownership check, delete flow
 rcip/dom.js           all DOM knowledge (injected into the page)
+rcip/enumerate.py     one-off conversation census (only used to shard parallel work)
+rcip/parallel.py      coordinator: profile cloning, sharding, worker supervision
 rcip/config.py        options, protected-user matching
 rcip/logging_setup.py run log, audit JSONL, failure artifacts
 tools/explore.py      structural recon for when the markup changes

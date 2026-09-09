@@ -11,7 +11,7 @@ from __future__ import annotations
 from .logging_setup import LOG
 
 
-def enumerate_rooms(browser, cfg, audit=None) -> list[dict]:
+def enumerate_rooms(browser, cfg, audit=None, limit: int | None = None) -> list[dict]:
     found: dict[str, dict] = {}
 
     def merge() -> None:
@@ -28,6 +28,8 @@ def enumerate_rooms(browser, cfg, audit=None) -> list[dict]:
             merge()
 
     LOG.info("taking a census of your conversations (needed once, to split the work)...")
+    if limit:
+        LOG.info("  (stopping early at %d, per --max-rooms)", limit)
     for pass_no in range(1, cfg.sidebar_passes + 1):
         before_pass = len(found)
         browser.rcip("scrollSidebarTop()")
@@ -44,8 +46,12 @@ def enumerate_rooms(browser, cfg, audit=None) -> list[dict]:
             stalled = 0 if after - before else stalled + 1
             if round_no % 25 == 0:
                 LOG.debug("  pass %d round %d: %d conversation(s)", pass_no, round_no, len(found))
+            if limit and len(found) >= limit:
+                break
             if stalled >= cfg.sidebar_settle_rounds:
                 break
+        if limit and len(found) >= limit:
+            break
         added = len(found) - before_pass
         LOG.info("  census pass %d: %d conversation(s) (+%d)", pass_no, len(found), added)
         if added == 0:
@@ -53,6 +59,8 @@ def enumerate_rooms(browser, cfg, audit=None) -> list[dict]:
 
     merge()
     rooms = list(found.values())
+    if limit:
+        rooms = rooms[:limit]
     if audit:
         audit.write("census", count=len(rooms))
     return rooms
