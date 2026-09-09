@@ -1,0 +1,153 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>fixture: reddit chat</title>
+<!--
+  Replica of the real chat.reddit.com DOM as verified in Sep 2026:
+  custom elements, open shadow roots, two virtualised scrollers, a hover
+  toolbar whose 4th button is Delete (yours) or Report (theirs), and a
+  "Yes, Delete" confirmation modal. Older history loads lazily on scroll-up.
+-->
+<style>
+  body { margin:0; display:flex; height:100vh; font:14px system-ui; }
+  rs-rooms-nav { width:300px; border-right:1px solid #ccc; display:flex; flex-direction:column; }
+  rs-virtual-scroll { display:block; overflow-y:auto; height:100%; }
+  rs-rooms-nav-room { display:block; }
+  rs-room { flex:1; display:flex; flex-direction:column; }
+  rs-timeline { flex:1; display:flex; flex-direction:column; min-height:0; }
+  rs-virtual-scroll-dynamic { display:block; overflow-y:auto; flex:1; height:850px; }
+  rs-timeline-event { display:block; position:relative; }
+  rs-timeline-event-menu { position:absolute; right:8px; top:2px; }
+  .modal-back { position:fixed; inset:0; background:rgba(0,0,0,.4); z-index:50;
+                display:flex; align-items:center; justify-content:center; }
+  .dialog-panel { background:#fff; padding:24px; border-radius:12px; width:560px; }
+</style>
+
+<rs-current-user display-name="me_myself" id="t2_fixture"></rs-current-user>
+<rs-rooms-nav><rs-virtual-scroll id="nav"></rs-virtual-scroll></rs-rooms-nav>
+<rs-room id="room"><rs-timeline id="timeline"></rs-timeline></rs-room>
+
+<script>
+const ME = 'me_myself';
+const PX = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==';
+
+// alice: 3 of mine + 1 theirs | bob: 2 of mine | carol(group): 1 mine + 1 theirs
+const ROOMS = [
+  { id: '!alice:reddit.com', user: 'alice_x',  mine: 3, theirs: 1, older: 2, group: false },
+  { id: '!bob:reddit.com',   user: 'bob_y',    mine: 2, theirs: 0, older: 0, group: false },
+  { id: '!carol:reddit.com', user: 'carol_z',  mine: 1, theirs: 1, older: 0, group: true  },
+];
+let seq = 0;
+const nextId = () => '$ev' + (++seq);
+
+/* ------------------------------------------------------------------ sidebar */
+for (const r of ROOMS) {
+  const row = document.createElement('rs-rooms-nav-room');
+  row.setAttribute('room', r.id);
+  const sh = row.attachShadow({ mode: 'open' });
+  const label = r.group ? `Group chat with ${r.user}, dave_w` : `Direct chat with ${r.user}`;
+  sh.innerHTML = `<div class="relative"><a class="peer container" href="/room/${encodeURIComponent(r.id)}"
+      aria-label="${label}"><rs-room-icon></rs-room-icon><div class="body">
+      <div class="row"><span>${r.user}</span><span>Sep 7</span></div>
+      <div class="row">preview text</div></div></a></div>`;
+  sh.querySelector('a').addEventListener('click', (e) => { e.preventDefault(); openRoom(r.id); });
+  document.getElementById('nav').appendChild(row);
+}
+// make the sidebar genuinely scrollable, like the real virtualised list
+const filler = document.createElement('div');
+filler.style.height = '1400px';
+document.getElementById('nav').appendChild(filler);
+
+/* ----------------------------------------------------------------- timeline */
+function makeEvent(roomCfg, { mine, image, sender }) {
+  const ev = document.createElement('rs-timeline-event');
+  ev.setAttribute('data-id', nextId());
+  ev.setAttribute('tabindex', '-1');
+  const sh = ev.attachShadow({ mode: 'open' });
+  const bodyCls = image ? 'room-message-body image-message' : 'room-message-body text-message';
+  const inner = image
+    ? `<div class="room-message-image"><rs-image src="https://matrix.redditspace.com/_matrix/media/v3/thumbnail/reddit.com/${ev.getAttribute('data-id').slice(1)}"><div><img src="${PX}" alt="Image" style="width:320px;height:200px;display:block"></div></rs-image></div>`
+    : `<div class="room-message-text">a message</div>`;
+  sh.innerHTML = `<div class="room-message regular">
+      <span class="user-name font-bold text-tone-1">${sender}</span>
+      <div class="${bodyCls}">${inner}</div></div>`;
+  ev.dataset.mine = mine ? '1' : '0';
+  ev.addEventListener('mouseenter', () => showMenu(ev));
+  ev.addEventListener('mouseleave', () => { const m = ev.shadowRoot.querySelector('rs-timeline-event-menu'); if (m) m.remove(); });
+  return ev;
+}
+
+function showMenu(ev) {
+  if (ev.shadowRoot.querySelector('rs-timeline-event-menu')) return;
+  const menu = document.createElement('rs-timeline-event-menu');
+  const msh = menu.attachShadow({ mode: 'open' });
+  // real site: 4th button is Delete on your own messages, Report on others'
+  const last = ev.dataset.mine === '1' ? 'Delete' : 'Report';
+  msh.innerHTML = ['Reply in thread', 'React', 'Copy Link', last]
+    .map((l) => `<button class="menu-item cursor-pointer" aria-label="${l}"
+        style="width:28px;height:28px">·</button>`).join('');
+  msh.querySelectorAll('button').forEach((b) => {
+    b.addEventListener('click', (e) => {
+      e.stopPropagation();
+      if (b.getAttribute('aria-label') === 'Delete') confirmDelete(ev);
+    });
+  });
+  ev.shadowRoot.querySelector('.room-message').appendChild(menu);
+}
+
+function confirmDelete(ev) {
+  const back = document.createElement('div');
+  back.className = 'modal-back';
+  back.innerHTML = `<div class="dialog-panel" role="dialog">
+      <h2>Delete this message?</h2>
+      <p>It will be removed for everyone in this chat. You can't undo this.</p>
+      <button>Cancel</button> <button>Yes, Delete</button></div>`;
+  const [cancel, yes] = back.querySelectorAll('button');
+  cancel.onclick = () => back.remove();
+  yes.onclick = () => { back.remove(); ev.remove(); window.__DELETED = (window.__DELETED || 0) + 1; };
+  document.body.appendChild(back);
+}
+
+/* --------------------------------------------------------------------- room */
+let currentRoom = null;
+let olderRemaining = 0;
+
+function openRoom(id) {
+  const cfg = ROOMS.find((r) => r.id === id) || ROOMS[0];
+  currentRoom = cfg;
+  olderRemaining = cfg.older;
+  const tl = document.getElementById('timeline');
+  tl.setAttribute('room', cfg.id);
+  document.getElementById('room').setAttribute('room', cfg.id);
+  tl.innerHTML = '';
+  const vs = document.createElement('rs-virtual-scroll-dynamic');
+  vs.setAttribute('itemselector', 'rs-timeline-event');
+  vs.setAttribute('stick-to-bottom', '');
+  tl.appendChild(vs);
+
+  for (let i = 0; i < 30; i += 1) vs.appendChild(makeEvent(cfg, { mine: i % 2 === 0, image: false, sender: i % 2 ? cfg.user : ME }));
+  for (let i = 0; i < cfg.mine; i += 1) {
+    vs.appendChild(makeEvent(cfg, { mine: true, image: true, sender: ME }));
+    for (let j = 0; j < 6; j += 1) vs.appendChild(makeEvent(cfg, { mine: false, image: false, sender: cfg.user }));
+  }
+  for (let i = 0; i < cfg.theirs; i += 1) {
+    vs.appendChild(makeEvent(cfg, { mine: false, image: true, sender: cfg.user }));
+    for (let j = 0; j < 6; j += 1) vs.appendChild(makeEvent(cfg, { mine: true, image: false, sender: ME }));
+  }
+  vs.scrollTop = vs.scrollHeight;   // stick-to-bottom, like the real client
+
+  // lazy-load older history when the user reaches the top
+  vs.addEventListener('scroll', () => {
+    if (vs.scrollTop <= 2 && olderRemaining > 0) {
+      olderRemaining -= 1;
+      const frag = document.createDocumentFragment();
+      frag.appendChild(makeEvent(cfg, { mine: true, image: true, sender: ME }));  // an older image of mine
+      for (let j = 0; j < 12; j += 1) frag.appendChild(makeEvent(cfg, { mine: false, image: false, sender: cfg.user }));
+      vs.insertBefore(frag, vs.firstChild);
+      vs.scrollTop = 40;   // keep a little room so further scroll-ups register
+    }
+  });
+}
+
+const qs = new URLSearchParams(location.search);
+openRoom(qs.get('room') || ROOMS[0].id);
+</script>
