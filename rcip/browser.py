@@ -49,6 +49,8 @@ class Browser:
         return self
 
     def __exit__(self, *exc) -> None:
+        if self._pw is None and self.context is None:
+            return              # already closed (coordinator frees it early)
         LOG.debug("closing browser context")
         for closer in (getattr(self.context, "close", None), getattr(self._pw, "stop", None)):
             try:
@@ -56,6 +58,9 @@ class Browser:
                     closer()
             except Exception as e:  # pragma: no cover
                 LOG.debug("teardown error: %s", e)
+        self.context = None
+        self._pw = None
+        self.page = None
 
     # ------------------------------------------------------------------ helpers
 
