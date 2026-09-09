@@ -72,6 +72,7 @@ class Config:
     state_file: "Path | None" = None
     room_url_template: str = "https://www.reddit.com/chat/room/{}"
     headless: bool = False
+    hidden: bool = False
     profile_dir: Path = Path(".browser-profile")
     login_timeout_s: int = 300
     keep_open: bool = False

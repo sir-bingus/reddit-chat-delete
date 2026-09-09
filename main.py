@@ -49,8 +49,13 @@ def build_parser() -> argparse.ArgumentParser:
                    help="pause after each deletion (default 1200ms; be kind to Reddit)")
     p.add_argument("--scroll-pause", type=int, default=700, metavar="MS")
     p.add_argument("--max-scroll-rounds", type=int, default=400)
+    p.add_argument("--hidden", action="store_true",
+                   help="keep the browser off-screen so no window appears on your display. "
+                        "Same real browser, same behaviour - Reddit's chat does not render "
+                        "in true headless mode, so this is the way to run it unattended.")
     p.add_argument("--headless", action="store_true",
-                   help="run without a visible window (only once you are logged in)")
+                   help="true headless. Does NOT work with Reddit chat (renders an empty "
+                        "page); kept only for experimentation. Use --hidden.")
     p.add_argument("--profile", type=Path, default=HERE / ".browser-profile",
                    help="persistent browser profile directory")
     p.add_argument("--login-timeout", type=int, default=300, metavar="SECONDS")
@@ -104,6 +109,7 @@ def main(argv: list[str] | None = None) -> int:
         scroll_pause_ms=args.scroll_pause,
         max_scroll_rounds=args.max_scroll_rounds,
         headless=args.headless,
+        hidden=args.hidden,
         profile_dir=args.profile,
         login_timeout_s=args.login_timeout,
         keep_open=args.keep_open,
@@ -126,7 +132,7 @@ def main(argv: list[str] | None = None) -> int:
     stats = Stats()
 
     try:
-        with Browser(cfg.profile_dir, headless=cfg.headless) as browser:
+        with Browser(cfg.profile_dir, headless=cfg.headless, hidden=cfg.hidden) as browser:
             attach_page_logging(browser.page, audit)
             browser.open_chat()
 
@@ -136,7 +142,7 @@ def main(argv: list[str] | None = None) -> int:
                 return 2
 
             if args.census_only is not None:
-                rooms = enumerate_rooms(browser, cfg, audit)
+                rooms = enumerate_rooms(browser, cfg, audit, limit=args.max_rooms)
                 args.census_only.write_text(json.dumps(rooms, indent=1), encoding="utf-8")
                 LOG.info("wrote %d conversation(s) to %s", len(rooms), args.census_only)
                 return 0
@@ -223,6 +229,8 @@ def _worker_argv(args) -> list[str]:
     argv += ["--delay", str(args.delay), "--scroll-pause", str(args.scroll_pause),
              "--room-settle", str(args.room_settle),
              "--max-scroll-rounds", str(args.max_scroll_rounds)]
+    if args.hidden:
+        argv.append("--hidden")
     if args.verbose:
         argv.append("-" + "v" * args.verbose)
     return argv

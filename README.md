@@ -90,12 +90,42 @@ run out.
 | `--max-deletes-per-room N` / `--max-deletes-total N` | Blast-radius limits. |
 | `--delay MS` | Pause after each deletion (default 1200ms). |
 | `--state FILE` / `--no-resume` | Progress file for resuming long runs. |
-| `--headless` | No visible window. Note: Reddit's chat app does **not** render headless — use this only if you have verified it works for you. |
+| `--hidden` | Hide the browser so no window sits on your screen (macOS). |
+| `--headless` | True headless. **Does not work** — see below. Kept for experimentation only. |
 | `--keep-open` | Leave the browser open at the end. |
 | `--workers N` | Run N browser windows in parallel on disjoint shards. |
 | `--census-only FILE` | Write the full conversation list to FILE and exit. |
 | `--inspect` | Dump live page structure and exit (see *When Reddit changes*). |
 | `-v` | Debug detail on the console. The log file always has everything. |
+
+## Running it without windows in your face
+
+```bash
+.venv/bin/python main.py --hidden -v
+```
+
+Reddit's chat **cannot** be driven in true headless Chromium. Tested directly: both the
+old headless shell and Chromium's new headless mode load `reddit.com/chat/` and render an
+empty shell — zero conversations, zero messages — while the same profile in a normal
+window shows 19 conversations and a full timeline. `--headless` therefore stays in the
+CLI only as an experiment hook, and warns when used.
+
+`--hidden` is the working alternative: a completely normal browser, hidden by the OS right
+after launch (macOS `System Events`), with Chromium's occlusion and timer throttling
+disabled so the virtualised lists keep painting while off-screen. Same renderer, same code
+path, same results — verified by running the same conversations visible and hidden and
+comparing every per-conversation outcome.
+
+Two caveats:
+
+* macOS ignores `--window-position`, so parking the window off-screen does not work; the
+  window genuinely has to be hidden by the OS.
+* Hiding uses AppleScript, which may need Terminal to have Accessibility permission
+  (System Settings → Privacy & Security → Accessibility). If it is refused, the run
+  continues normally with the window visible and says so — it never fails the run.
+* `--hidden` is macOS-only. Elsewhere it warns and stays visible.
+
+It is inherited by `--workers`, so parallel runs hide every window too.
 
 ## How it decides what to delete
 

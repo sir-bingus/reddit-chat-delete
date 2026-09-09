@@ -5,12 +5,24 @@ from __future__ import annotations
 import time
 from pathlib import Path
 
+import platform
+import subprocess
+
 from playwright.sync_api import Error as PlaywrightError
 from playwright.sync_api import sync_playwright
 
 from .logging_setup import LOG
 
 CHAT_URL = "https://chat.reddit.com/"
+
+# Keep a hidden window rendering normally instead of being throttled as
+# "occluded" - the virtualised lists depend on it actually painting.
+ANTI_THROTTLE = [
+    "--disable-background-timer-throttling",
+    "--disable-backgrounding-occluded-windows",
+    "--disable-renderer-backgrounding",
+    "--disable-features=CalculateNativeWinOcclusion",
+]
 
 
 class BrowserClosed(RuntimeError):
@@ -25,9 +37,11 @@ class Browser:
     reuses the cookies. Nothing touches your real Chrome.
     """
 
-    def __init__(self, profile_dir: Path, headless: bool = False, chat_url: str = CHAT_URL):
+    def __init__(self, profile_dir: Path, headless: bool = False, chat_url: str = CHAT_URL,
+                 hidden: bool = False):
         self.profile_dir = profile_dir
         self.headless = headless
+        self.hidden = hidden
         self.chat_url = chat_url  # overridden by the test fixture
         self._pw = None
         self.context = None
@@ -35,18 +49,76 @@ class Browser:
 
     def __enter__(self) -> "Browser":
         self.profile_dir.mkdir(parents=True, exist_ok=True)
-        LOG.info("launching Chromium with profile %s (headless=%s)", self.profile_dir, self.headless)
+        args = ["--disable-blink-features=AutomationControlled"]
+        if self.hidden:
+            # Reddit's chat renders an empty shell in headless Chromium (both the
+            # old headless shell and the new mode), so "invisible" means a real
+            # browser that is hidden by the OS after launch. macOS ignores
+            # --window-position, so off-screen placement is not an option.
+            args += ANTI_THROTTLE
+        LOG.info("launching Chromium with profile %s (%s)", self.profile_dir,
+                 "headless" if self.headless else ("off-screen window" if self.hidden
+                                                   else "visible window"))
+        if self.headless:
+            LOG.warning("--headless is not supported by Reddit chat: the app renders an "
+                        "empty page. Use --hidden for an off-screen window instead.")
         self._pw = sync_playwright().start()
         self.context = self._pw.chromium.launch_persistent_context(
             user_data_dir=str(self.profile_dir),
             headless=self.headless,
             viewport={"width": 1440, "height": 950},
-            args=["--disable-blink-features=AutomationControlled"],
+            args=args,
         )
         self.context.add_init_script(path=str(DOM_JS))
         self.page = self.context.pages[0] if self.context.pages else self.context.new_page()
         self.page.set_default_timeout(15_000)
+        if self.hidden:
+            self._hide_window()
         return self
+
+    # ------------------------------------------------------------------ hiding
+
+    def _browser_pid(self) -> int | None:
+        """The Chromium process owning our profile (not its helper processes)."""
+        try:
+            out = subprocess.run(["ps", "-Ao", "pid,command"], capture_output=True,
+                                 text=True, timeout=10).stdout
+        except Exception as exc:
+            LOG.debug("ps failed: %s", exc)
+            return None
+        needle = f"--user-data-dir={self.profile_dir}"
+        for line in out.splitlines():
+            if needle in line and "Helper" not in line:
+                try:
+                    return int(line.split()[0])
+                except ValueError:
+                    continue
+        return None
+
+    def _hide_window(self) -> None:
+        """Ask the OS to hide the browser. Never fatal - we just stay visible."""
+        if platform.system() != "Darwin":
+            LOG.warning("--hidden is only implemented for macOS; the window will stay visible")
+            return
+        pid = self._browser_pid()
+        if pid is None:
+            LOG.warning("could not find the browser process; the window will stay visible")
+            return
+        script = ('tell application "System Events" to set visible of '
+                  f'(first process whose unix id is {pid}) to false')
+        try:
+            r = subprocess.run(["osascript", "-e", script], capture_output=True,
+                               text=True, timeout=15)
+        except Exception as exc:
+            LOG.warning("could not hide the browser (%s); it will stay visible", exc)
+            return
+        if r.returncode == 0:
+            LOG.info("browser hidden (pid %d); it keeps running off-screen", pid)
+        else:
+            LOG.warning("could not hide the browser: %s. This usually means Terminal needs "
+                        "Accessibility permission in System Settings > Privacy & Security. "
+                        "The run continues with the window visible.",
+                        (r.stderr or "").strip()[:160])
 
     def __exit__(self, *exc) -> None:
         if self._pw is None and self.context is None:
