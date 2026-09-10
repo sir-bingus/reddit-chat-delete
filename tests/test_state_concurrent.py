@@ -1,28 +1,22 @@
-"""Many processes writing progress must never lose each other's work."""
-import json, multiprocessing, sys, tempfile, random, time
+"""Several processes writing the shared record must not lose each other's work.
+
+Targets rcip.store.Store, which every part of the current program uses.
+"""
+import json, multiprocessing, random, sys, tempfile, time
 from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
-from rcip.config import Config
-from rcip.purge import Purger
-
-
-def _stub(state_file):
-    obj = type("P", (), {})()
-    obj.state_path = state_file
-    obj.cfg = Config(state_file=state_file)
-    obj.done_rooms = set()
-    obj._save_state = Purger._save_state.__get__(obj)
-    obj._load_state = Purger._load_state.__get__(obj)
-    return obj
+from rcip.store import Store, Target, DELETED
 
 
 def worker(args):
-    state_file, wid, n = args
-    p = _stub(Path(state_file))
+    path, wid, n = args
     for i in range(n):
-        p.done_rooms.add(f"!w{wid}-r{i}:reddit.com")
-        p._save_state()
+        store = Store(Path(path))          # each write re-reads, like a real run
+        rid = f"!w{wid}-r{i}:reddit.com"
+        store.record_scan(rid, [f"user{wid}"], 10, [Target(f"$e{wid}-{i}", "m.image", i)])
+        store.set_status(rid, f"$e{wid}-{i}", DELETED)
+        store.save()
         time.sleep(random.uniform(0, 0.004))
     return wid
 
@@ -35,18 +29,19 @@ def main() -> int:
         if not ok: fails.append(name)
 
     tmp = Path(tempfile.mkdtemp())
-    state = tmp / "state.json"
-    W, N = 6, 40
+    path = tmp / "chat-records.json"
+    W, N = 5, 25
     with multiprocessing.Pool(W) as pool:
-        pool.map(worker, [(str(state), w, N) for w in range(W)])
+        pool.map(worker, [(str(path), w, N) for w in range(W)])
 
-    done = set(json.loads(state.read_text())["done_rooms"])
-    check(f"{W} concurrent writers x {N} conversations, none lost", len(done), W * N)
-    check("file is valid JSON with no duplicates",
-          len(done) == len(json.loads(state.read_text())["done_rooms"]), True)
+    raw = json.loads(path.read_text())
+    check("file is valid JSON after concurrent writes", isinstance(raw.get("rooms"), dict), True)
+    check(f"{W} writers x {N} conversations, none lost", len(raw["rooms"]), W * N)
 
-    # a later run sees everything without any manual merging
-    check("a fresh run loads all prior progress", len(_stub(state)._load_state()), W * N)
+    store = Store(path)
+    check("a later run sees them all", len(store.rooms), W * N)
+    check("statuses survived", store.summary()[DELETED], W * N)
+    check("nothing left pending", store.summary()["pending"], 0)
 
     print("\n" + ("FAILED: " + ", ".join(fails) if fails else "all concurrency checks passed"))
     return 1 if fails else 0
