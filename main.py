@@ -170,8 +170,14 @@ def main(argv=None) -> int:
 
     runner = Runner(client, store, audit, opts, me)
     try:
-        counts = runner.run(rooms, kind if args.command != "hide" else None,
-                            hide=hide)
+        counts = runner.run(
+            rooms,
+            kind=None if args.command == "hide" else kind,
+            hide=hide,
+            # `hide` deletes nothing, so its standard comes from --require;
+            # --then-hide judges by whatever that run was deleting.
+            hide_require=args.require if args.command == "hide" else kind,
+        )
     except KeyboardInterrupt:
         LOG.warning("interrupted - progress is saved")
         counts = runner.counts

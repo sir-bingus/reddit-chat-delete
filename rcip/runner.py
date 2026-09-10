@@ -224,8 +224,18 @@ class Runner:
 
     # ------------------------------------------------------------------- run
 
-    def run(self, room_ids: list[str], kind: str | None, hide: bool) -> Counters:
-        """Walk conversations once, doing whatever this invocation asks for."""
+    def run(self, room_ids: list[str], kind: str | None, hide: bool,
+            hide_require: str | None = None) -> Counters:
+        """Walk conversations once, doing whatever this invocation asks for.
+
+        `kind` is what to delete (None = delete nothing). `hide_require` is
+        what must already be gone before a conversation may be left; it is
+        separate from `kind` because `hide` on its own deletes nothing yet
+        still needs to know the standard to judge against.
+        """
+        if hide:
+            LOG.info("hiding requires: nothing of yours left of type '%s'",
+                     hide_require or kind or Kind.MESSAGES)
         total = len(room_ids)
         for index, room_id in enumerate(room_ids, 1):
             if self.opts.max_rooms and self.counts.rooms_seen >= self.opts.max_rooms:
@@ -261,7 +271,7 @@ class Runner:
             if kind:
                 self.delete_in(room, kind)
             if hide:
-                self.hide_room(room, kind or Kind.MESSAGES)
+                self.hide_room(room, hide_require or kind or Kind.MESSAGES)
 
             if index % 25 == 0:
                 self.store.save()
