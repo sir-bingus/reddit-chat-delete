@@ -84,7 +84,8 @@ def build_parser() -> argparse.ArgumentParser:
     subs.add_parser("messages", parents=[parent],
                     help="remove every message you sent, attachments included")
     h = subs.add_parser("hide", parents=[parent],
-                        help="(NOT SUPPORTED - Reddit refuses to leave chat rooms)")
+                        help="hide conversations that have nothing of yours left, the "
+                             "same way the Reddit UI's hide button does")
     h.add_argument("--require", choices=[Kind.IMAGES, Kind.MESSAGES], default=Kind.MESSAGES,
                    help="what must already be gone before hiding "
                         "(default: everything you sent)")
@@ -118,13 +119,6 @@ def main(argv=None) -> int:
 
     skip = load_skip_list(args.skip_users if args.skip_users.exists() else None)
     skip |= {normalize_user(s) for s in args.skip}
-
-    if args.command == "hide":
-        LOG.error("Hiding is not supported. Reddit's API refuses to leave a chat room "
-                  "(403 M_FORBIDDEN, \"You cannot leave this room\"), and exposes no room "
-                  "tags or account data we could use instead. Whatever the web UI's hide "
-                  "button does, it is not something this tool can reach yet.")
-        return 2
 
     if args.command == "nuke":
         return _nuke(args, skip, paths, audit, store)
@@ -171,6 +165,7 @@ def main(argv=None) -> int:
         client.token = reauth()
         me = client.whoami()["user_id"]
     store.account = me
+    client.user_id = me          # per-user account data paths need this
     LOG.info("signed in as %s", me)
 
     rooms = client.joined_rooms()
@@ -220,7 +215,8 @@ def _nuke(args, skip, paths, audit, store) -> int:
     protected = f"{len(skip)} protected user(s) will be left alone" if skip else \
                 "NO protected users are configured - nothing is exempt"
     LOG.info("=" * 70)
-    LOG.info("NUKE - scan, then delete every message you sent")
+    LOG.info("NUKE - scan, delete every message you sent%s",
+             "" if args.keep_conversations else ", then hide every conversation")
     LOG.info("%s", protected)
     LOG.info("=" * 70)
 
@@ -239,9 +235,7 @@ def _nuke(args, skip, paths, audit, store) -> int:
 
     phases = [("scan", None, False), ("messages", Kind.MESSAGES, False)]
     if not args.keep_conversations:
-        LOG.warning("hiding conversations is not supported (Reddit refuses to leave "
-                    "chat rooms), so this will delete everything but leave the "
-                    "conversations in your list")
+        phases.append(("hide", None, True))
 
     for name, kind, hide in phases:
         LOG.info("")

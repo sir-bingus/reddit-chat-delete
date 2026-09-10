@@ -43,6 +43,7 @@ class MatrixClient:
     limits: Limits = field(default_factory=Limits)
     on_reauth: object = None        # callable returning a fresh token
     _last_call: float = 0.0
+    user_id: str = ""            # needed to address per-user account data
     rate_limited: int = 0
     reauths: int = 0
     calls: int = 0
@@ -159,7 +160,31 @@ class MatrixClient:
         body = {"reason": reason} if reason else {}
         return self.request("PUT", path, body=body).get("event_id", "")
 
+    def set_hidden(self, room: str, hidden: bool = True) -> None:
+        """Hide (or unhide) a conversation in your own chat list.
+
+        This is what Reddit's own hide button does - per-room account data,
+        not leaving the room. Matrix leave is rejected outright on Reddit
+        chat rooms. Being account data, it is private to you and reversible;
+        the other person sees nothing.
+        """
+        path = (f"/_matrix/client/v3/user/{urllib.parse.quote(self.user_id, safe='')}"
+                f"/rooms/{urllib.parse.quote(room, safe='')}"
+                f"/account_data/com.reddit.hidden_chat")
+        self.request("PUT", path, body={"hidden": bool(hidden)})
+
+    def is_hidden(self, room: str) -> bool:
+        path = (f"/_matrix/client/v3/user/{urllib.parse.quote(self.user_id, safe='')}"
+                f"/rooms/{urllib.parse.quote(room, safe='')}"
+                f"/account_data/com.reddit.hidden_chat")
+        try:
+            return bool(self.request("GET", path).get("hidden"))
+        except Exception:
+            return False
+
     def leave(self, room: str) -> None:
+        """Not usable on Reddit chat: the server answers 403 'You cannot leave
+        this room'. Kept only so the distinction stays visible."""
         self.request("POST", f"/_matrix/client/v3/rooms/{urllib.parse.quote(room, safe='')}/leave",
                      body={})
 

@@ -20,8 +20,7 @@ class FakeAPI:
     def redact(self, room, event_id, reason=None): self.redacted.append(event_id); return "$r"
     def members(self, room): raise AssertionError("delete must not re-fetch members")
     def iter_messages(self, room): raise AssertionError("delete must not re-page history")
-    def leave(self, room): pass
-    def forget(self, room): pass
+    def set_hidden(self, room, hidden=True): pass
 
 
 MIXED = [Target("$img", "m.image", 1), Target("$vid", "m.video", 2),
@@ -70,8 +69,11 @@ check("clean of attachments after an images run",
       room.is_clean(Kind.msgtypes(Kind.IMAGES)), True)
 check("not clean of everything: text remains",
       room.is_clean(Kind.msgtypes(Kind.MESSAGES)), False)
-check("hide refuses regardless, since Reddit will not allow it",
-      r.hide_room(room, Kind.IMAGES), False)
+check("hide --require images: allowed once attachments are gone",
+      r.hide_room(room, Kind.IMAGES), True)
+api2, store2, r2 = run(Kind.IMAGES, tmp=tmp / "e")
+check("hide --require messages: refused while text remains",
+      r2.hide_room(store2.rooms["!r:x"], Kind.MESSAGES), False)
 
 print("\n" + ("FAILED: " + ", ".join(fails) if fails else "all kind checks passed"))
 sys.exit(1 if fails else 0)

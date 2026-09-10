@@ -21,12 +21,11 @@ from .logging_setup import LOG, Audit
 from .store import DELETED, FAILED, GONE, Store, Target
 from .targets import Kind, deletable, msgtype_of
 
-# Reddit's gateway rejects the Matrix leave endpoint on every chat room with
-# 403 M_FORBIDDEN "You cannot leave this room", and implements neither room
-# tags nor any account_data we could find for it. Whatever the web UI's "hide"
-# does, it is not Matrix leave/forget, so this stays off until we know what it
-# actually calls. Verified against the live API on 2026-09-10.
-HIDE_SUPPORTED = False
+# Hiding is per-room account data (com.reddit.hidden_chat), captured from what
+# the web UI itself sends. Matrix leave is rejected on Reddit chat rooms with
+# 403 "You cannot leave this room", so this is the only mechanism there is -
+# and a better one: it is private to you and reversible.
+HIDE_SUPPORTED = True
 
 
 @dataclass
@@ -226,7 +225,7 @@ class Runner:
             return False
         if not HIDE_SUPPORTED:
             self.counts.failed += 1
-            LOG.warning("  cannot hide: Reddit refuses to leave chat rooms")
+            LOG.warning("  hiding is disabled in this build")
             return False
         if not self.opts.execute:
             self.counts.would_hide += 1
@@ -234,16 +233,15 @@ class Runner:
             self.audit.write("room_hide", room=room.room_id, outcome="would-hide")
             return False
         try:
-            self.api.leave(room.room_id)
-            self.api.forget(room.room_id)
+            self.api.set_hidden(room.room_id, True)
             self.store.mark_hidden(room.room_id)
             self.counts.rooms_hidden += 1
-            LOG.info("  left and hid this conversation")
+            LOG.info("  hidden from your chat list")
             self.audit.write("room_hide", room=room.room_id, outcome="hidden")
             return True
         except Exception as exc:
             self.counts.failed += 1
-            LOG.warning("  could not leave: %s", str(exc)[:160])
+            LOG.warning("  could not hide: %s", str(exc)[:160])
             self.audit.write("room_hide", room=room.room_id, outcome="failed",
                              error=str(exc)[:200])
             return False

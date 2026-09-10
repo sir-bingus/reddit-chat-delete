@@ -24,8 +24,7 @@ class FakeAPI:
         self.redacted.append((room, event_id)); return "$r"
     def members(self, room): raise AssertionError("should not re-fetch members")
     def iter_messages(self, room): raise AssertionError("should not re-page history")
-    def leave(self, room): self.left.append(room)
-    def forget(self, room): pass
+    def set_hidden(self, room, hidden=True): self.left.append(room)
 
 
 def build(skip, participants, tmp):
@@ -70,9 +69,8 @@ runner.opts.execute = True
 check("will not hide a conversation that still has your content",
       runner.hide_room(store.room("!r:x"), Kind.MESSAGES), False)
 store.room("!r:x").targets["$img"].status = "deleted"
-check("still refuses once clean: Reddit does not permit leaving",
-      runner.hide_room(store.room("!r:x"), Kind.MESSAGES), False)
-check("nothing was left", api.left, [])
+check("hides once it is clean", runner.hide_room(store.room("!r:x"), Kind.MESSAGES), True)
+check("the hide was applied to that conversation", api.left, ["!r:x"])
 
 print("\n" + ("FAILED: " + ", ".join(fails) if fails else "all protection checks passed"))
 sys.exit(1 if fails else 0)
