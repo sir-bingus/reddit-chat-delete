@@ -81,6 +81,17 @@ class Runner:
     def _protected(self, participants: list[str]) -> list[str]:
         return sorted(p for p in participants if normalize_user(p) in self.opts.skip_users)
 
+    def _still_skipped(self, room) -> bool:
+        """Does the reason a conversation was skipped still hold?"""
+        if room.skipped.startswith("protected:"):
+            names = [n for n in room.skipped.split(":", 1)[1].split(",") if n]
+            # protected only while at least one of those names is still listed
+            return any(normalize_user(n) in self.opts.skip_users for n in names)
+        if room.skipped == "unidentified":
+            # only while we still cannot say who is in it and a list is in force
+            return bool(self.opts.skip_users) and not room.participants
+        return True
+
     def _allowed(self, room) -> bool:
         """False if this conversation must be left alone.
 
@@ -272,8 +283,16 @@ class Runner:
 
             known = self.store.rooms.get(room_id)
             if known is not None and known.skipped:
-                self.counts.rooms_skipped += 1
-                continue
+                # Re-judge rather than trusting the old marker: removing a name
+                # from the protected list, or a conversation becoming
+                # identifiable, must let it back in. Otherwise one skip is
+                # permanent and nothing you change afterwards has any effect.
+                if self._still_skipped(known):
+                    self.counts.rooms_skipped += 1
+                    continue
+                LOG.info("previously skipped (%s) but not any more; reconsidering",
+                         known.skipped)
+                known.skipped = ""
 
             room = self.room_for(room_id)
             if room is None:            # skipped during the scan
@@ -288,15 +307,17 @@ class Runner:
 
             who = ", ".join(room.participants) or "(unknown)"
             pending = len(room.pending(Kind.msgtypes(kind))) if kind else 0
-            # Only announce conversations with work in them. Logging a line for
-            # every one made a purely local pass look like network activity.
-            line = (f"{pending} {Kind.describe(kind)} pending" if kind
-                    else f"{len(room.targets)} of your messages on record")
-            if pending or hide:
-                LOG.info("[%d/%d] u/%-24s %s", index, total, who[:24], line)
+            # Say what this run is about to do here, and nothing else. Showing
+            # a count of previously deleted messages during a hide run read as
+            # "still has your content", which is the opposite of the truth.
+            if kind and pending:
+                LOG.info("[%d/%d] u/%-24s %d %s to remove",
+                         index, total, who[:24], pending, Kind.describe(kind))
+            elif hide and not room.hidden:
+                LOG.info("[%d/%d] u/%-24s clean - hiding", index, total, who[:24])
             else:
                 self.counts.rooms_clean += 1
-                LOG.debug("[%d/%d] u/%s %s", index, total, who[:24], line)
+                LOG.debug("[%d/%d] u/%s nothing to do", index, total, who[:24])
 
             if kind:
                 self.delete_in(room, kind)

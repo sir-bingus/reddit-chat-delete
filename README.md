@@ -98,6 +98,47 @@ A cautious first live run:
 
 ---
 
+## What a second run does
+
+Everything is recorded in `chat-records.json`, and every command reads it
+before acting. That is what makes reruns cheap and safe to repeat: a second run
+picks up exactly what is unfinished and leaves the rest alone.
+
+Each of your messages carries one of four states:
+
+| State | Meaning | Retried on a rerun? |
+| --- | --- | --- |
+| `pending` | Recorded by a scan, not yet deleted | **Yes** |
+| `failed` | We tried and it did not work - a timeout, say | **Yes** |
+| `deleted` | We deleted it | No |
+| `gone` | It was already absent when we looked | No |
+
+So a failed deletion is not lost: rerun the same command and it goes straight
+back to the `pending` and `failed` ones. Nothing that already succeeded is
+touched again.
+
+At the conversation level:
+
+- **Already scanned** conversations are not re-read from the network. Use
+  `--rescan` to force it, or `--rescan-after HOURS` to treat old scans as
+  stale. Rescan when you have used Reddit since - new messages you sent will
+  not be noticed otherwise.
+- **Already hidden** conversations are not hidden again.
+- **Protected** conversations are skipped, and re-judged every run: remove a
+  name from `skip_users.txt` and that conversation is reconsidered next time;
+  add one and it is protected from then on, even if it was scanned earlier.
+- **Unidentifiable** conversations (participants unknown while a protected list
+  is in force) are skipped, and reconsidered if a later scan works out who is
+  in them.
+
+A run that ends early - Ctrl-C, a crash, a closed laptop - loses nothing beyond
+the conversation in flight. Progress is written as it goes, so the same command
+resumes from where it stopped.
+
+To start over completely, delete `chat-records.json`. That discards what has
+been done, so the next run rescans everything and re-attempts anything Reddit
+still shows as present.
+
 ## Protected users
 
 Put usernames in `skip_users.txt`:
