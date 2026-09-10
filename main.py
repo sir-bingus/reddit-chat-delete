@@ -23,7 +23,7 @@ import sys
 from pathlib import Path
 
 from rcip.api import Limits, MatrixClient
-from rcip.auth import harvest_token
+from rcip.auth import get_token, save_cached
 from rcip.config import load_skip_list, normalize_user
 from rcip.logging_setup import LOG, Audit, configure, new_run
 from rcip.runner import Options, Runner
@@ -60,6 +60,11 @@ def build_parser() -> argparse.ArgumentParser:
                         "(default: ./chat-records.json)")
     g.add_argument("--profile", type=Path, default=HERE / ".browser-profile",
                    help="browser profile holding your Reddit login")
+    g.add_argument("--token-cache", type=Path, default=HERE / ".session-token.json",
+                   help="where the session token is cached between runs so a browser "
+                        "is rarely needed (default: ./.session-token.json, owner-only)")
+    g.add_argument("--fresh-token", action="store_true",
+                   help="ignore the cached token and harvest a new one")
     g.add_argument("--show-window", action="store_true",
                    help="show the browser used to pick up your session token")
     g.add_argument("--min-interval", type=float, default=0.0, metavar="SEC",
@@ -126,11 +131,24 @@ def main(argv=None) -> int:
                    max_deletes=args.max_deletes, rescan=args.rescan,
                    rescan_after_s=args.rescan_after * 3600)
 
-    token, base = harvest_token(args.profile, hidden=not args.show_window)
+    token, base = get_token(args.profile, args.token_cache,
+                            hidden=not args.show_window, force=args.fresh_token)
+
+    def reauth() -> str:
+        """Called when the server rejects our token mid-run."""
+        fresh, fresh_base = get_token(args.profile, args.token_cache,
+                                      hidden=not args.show_window, force=True)
+        save_cached(args.token_cache, fresh, fresh_base)
+        return fresh
+
     client = MatrixClient(token, base, Limits(min_interval_s=args.min_interval),
-                          on_reauth=lambda: harvest_token(
-                              args.profile, hidden=not args.show_window)[0])
-    me = client.whoami()["user_id"]
+                          on_reauth=reauth)
+    try:
+        me = client.whoami()["user_id"]
+    except Exception:
+        LOG.info("cached token was not accepted; getting a fresh one")
+        client.token = reauth()
+        me = client.whoami()["user_id"]
     store.account = me
     LOG.info("signed in as %s", me)
 

@@ -11,3 +11,4 @@ rooms.json
 __pycache__/
 *.pyc
 .venv/
+.session-token.json

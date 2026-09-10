@@ -72,6 +72,30 @@ class Runner:
     def _protected(self, participants: list[str]) -> list[str]:
         return sorted(p for p in participants if normalize_user(p) in self.opts.skip_users)
 
+    def _allowed(self, room) -> bool:
+        """False if this conversation must be left alone.
+
+        Checked afresh on every run against the stored participants, so the
+        protected list applies to conversations scanned before a name was
+        added to it. A conversation whose participants we never established
+        is refused while any protected list is in force.
+        """
+        hit = self._protected(room.participants)
+        if hit:
+            self.store.mark_skipped(room.room_id, f"protected:{','.join(hit)}")
+            self.counts.rooms_skipped += 1
+            LOG.info("  SKIPPED - protected: %s", ", ".join(hit))
+            self.audit.write("room_skipped", room=room.room_id, matched=hit,
+                             participants=room.participants, reason="skip_list_recheck")
+            return False
+        if not room.participants:
+            self.counts.rooms_skipped += 1
+            LOG.warning("  SKIPPED - participants unknown and a protected list is in force")
+            self.audit.write("room_skipped", room=room.room_id,
+                             reason="unidentified_participants")
+            return False
+        return True
+
     def scan_room(self, room_id: str) -> object:
         """Page a conversation's history and record every message of yours.
 
@@ -219,6 +243,13 @@ class Runner:
 
             room = self.room_for(room_id)
             if room is None:            # skipped during the scan
+                continue
+
+            # Re-check protection every run, not just at scan time. A name
+            # added to the list after a conversation was scanned must still
+            # protect it, and stored records would otherwise sail straight
+            # past the check.
+            if self.opts.skip_users and not self._allowed(room):
                 continue
 
             who = ", ".join(room.participants) or "(unknown)"
