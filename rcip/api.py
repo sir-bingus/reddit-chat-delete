@@ -21,7 +21,6 @@ from dataclasses import dataclass, field
 
 from .logging_setup import LOG
 
-MEDIA_MSGTYPES = {"m.image", "m.video", "m.file", "m.audio"}
 DEFAULT_BASE = "https://matrix.redditspace.com"
 
 
@@ -160,55 +159,6 @@ class MatrixClient:
     def forget(self, room: str) -> None:
         self.request("POST", f"/_matrix/client/v3/rooms/{urllib.parse.quote(room, safe='')}/forget",
                      body={})
-
-
-# ------------------------------------------------------------------ token grab
-
-def harvest_token(profile_dir, hidden: bool = True, timeout_s: int = 120) -> tuple[str, str]:
-    """Read the bearer token off a request the real web client makes.
-
-    Cheaper and far more robust than reverse-engineering where the client
-    stashes its credentials, which are not in localStorage.
-    """
-    from .browser import Browser
-
-    cap: dict[str, str] = {}
-
-    def on_request(r):
-        if "_matrix" not in r.url:
-            return
-        for k, v in r.headers.items():
-            if k.lower() == "authorization" and v.lower().startswith("bearer "):
-                cap.setdefault("token", v.split(" ", 1)[1])
-                cap.setdefault("base", r.url.split("/_matrix")[0])
-
-    LOG.info("starting a browser briefly to pick up your session token...")
-    with Browser(profile_dir, hidden=hidden) as b:
-        b.page.on("request", on_request)
-        b.open_chat()
-        if not b.wait_for_login(timeout_s):
-            raise RuntimeError("not logged in; cannot read a token")
-        for _ in range(20):
-            if "token" in cap:
-                break
-            b.page.wait_for_timeout(500)
-    if "token" not in cap:
-        raise RuntimeError("no Matrix token seen; is this the chat page?")
-    LOG.info("got a session token (%d chars) for %s", len(cap["token"]), cap["base"])
-    return cap["token"], cap.get("base", DEFAULT_BASE)
-
-
-def is_media(event: dict) -> bool:
-    c = event.get("content") or {}
-    return c.get("msgtype") in MEDIA_MSGTYPES
-
-
-def is_message(event: dict) -> bool:
-    return event.get("type") == "m.room.message" and bool(event.get("content"))
-
-
-def is_redacted(event: dict) -> bool:
-    return bool(event.get("unsigned", {}).get("redacted_because")) or not event.get("content")
 
 
 def members_from_events(events: list[dict]) -> dict[str, str]:

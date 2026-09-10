@@ -1,6 +1,0 @@
-# One username per line. Case-insensitive. "u/" prefix optional.
-# Conversations with any of these users are left completely untouched.
-# Lines starting with # are comments.
-
-# some_friend
-# u/AnotherPerson

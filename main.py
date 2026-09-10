@@ -96,6 +96,13 @@ def build_parser() -> argparse.ArgumentParser:
             help="after a conversation is clean, leave and hide it")
     subs.add_parser("status", parents=[parent],
                     help="summarise the stored records; makes no network calls")
+    n = subs.add_parser("nuke", parents=[parent],
+                        help="the lot: scan, delete every message you sent, then hide "
+                             "every conversation. Asks for confirmation.")
+    n.add_argument("--yes", action="store_true",
+                   help="skip the typed confirmation (for unattended runs)")
+    n.add_argument("--keep-conversations", action="store_true",
+                   help="delete everything but do not leave/hide the conversations")
     return p
 
 
@@ -111,6 +118,9 @@ def main(argv=None) -> int:
 
     skip = load_skip_list(args.skip_users if args.skip_users.exists() else None)
     skip |= {normalize_user(s) for s in args.skip}
+
+    if args.command == "nuke":
+        return _nuke(args, skip, paths, audit, store)
 
     kind = {"images": Kind.IMAGES, "messages": Kind.MESSAGES}.get(args.command)
     hide = args.command == "hide" or getattr(args, "then_hide", False)
@@ -188,6 +198,67 @@ def main(argv=None) -> int:
                     rate_limited=client.rate_limited)
         audit.close()
     return 1 if counts.failed else 0
+
+
+def _nuke(args, skip, paths, audit, store) -> int:
+    """scan -> delete every message -> hide, in one command.
+
+    Sequenced rather than reimplemented: each phase is the ordinary command,
+    so nothing here can drift from the individually tested behaviour.
+    """
+    protected = f"{len(skip)} protected user(s) will be left alone" if skip else \
+                "NO protected users are configured - nothing is exempt"
+    LOG.info("=" * 70)
+    LOG.info("NUKE - scan, delete every message you sent%s",
+             "" if args.keep_conversations else ", then leave every conversation")
+    LOG.info("%s", protected)
+    LOG.info("=" * 70)
+
+    if not args.execute:
+        LOG.info("This is a DRY RUN. Re-run with --execute to actually do it.")
+    elif not args.yes:
+        LOG.warning("This permanently deletes every message you have sent in Reddit chat")
+        LOG.warning("and cannot be undone. Reddit removes them for everyone in the chat.")
+        try:
+            typed = input("Type  DELETE EVERYTHING  to continue: ").strip()
+        except (EOFError, KeyboardInterrupt):
+            typed = ""
+        if typed != "DELETE EVERYTHING":
+            LOG.info("cancelled - nothing was changed")
+            return 1
+
+    phases = [("scan", None, False), ("messages", Kind.MESSAGES, False)]
+    if not args.keep_conversations:
+        phases.append(("hide", None, True))
+
+    for name, kind, hide in phases:
+        LOG.info("")
+        LOG.info(">>> phase: %s", name)
+        rc = main([name, *_passthrough(args), *(["--execute"] if args.execute else [])])
+        if rc not in (0, 1):
+            LOG.error("phase %s failed; stopping", name)
+            return rc
+    return 0
+
+
+def _passthrough(args) -> list[str]:
+    """The flags a nuke phase should inherit from the nuke invocation."""
+    out = ["--store", str(args.store), "--profile", str(args.profile),
+           "--skip-users", str(args.skip_users), "--reports", str(args.reports),
+           "--token-cache", str(args.token_cache)]
+    for u in args.skip:
+        out += ["--skip", u]
+    if args.max_rooms:
+        out += ["--max-rooms", str(args.max_rooms)]
+    if args.max_deletes:
+        out += ["--max-deletes", str(args.max_deletes)]
+    if args.min_interval:
+        out += ["--min-interval", str(args.min_interval)]
+    if args.show_window:
+        out.append("--show-window")
+    if args.verbose:
+        out.append("-" + "v" * args.verbose)
+    return out
 
 
 def _summary(args, counts, store, client, kind) -> None:

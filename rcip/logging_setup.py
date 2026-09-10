@@ -7,8 +7,6 @@ them:
   * run log file - everything at DEBUG, one file per run, kept forever
   * audit JSONL  - one machine-readable record per image considered
 
-Plus `dump_artifacts()`, which snapshots a screenshot + the page HTML at the
-moment something went wrong.
 """
 
 from __future__ import annotations
@@ -134,24 +132,3 @@ def attach_page_logging(page, audit: "Audit | None" = None) -> None:
     page.on("response", on_response)
     page.on("framenavigated", lambda f: LOG.debug("navigated: %s", f.url[:160]) if f == page.main_frame else None)
     LOG.debug("page logging attached")
-
-
-def dump_artifacts(page, paths: RunPaths, tag: str) -> dict:
-    """Screenshot + HTML at a failure point. Never raises."""
-    stamp = f"{time.strftime('%H%M%S')}-{tag}"
-    out = {}
-    try:
-        shot = paths.artifacts / f"{stamp}.png"
-        page.screenshot(path=str(shot), full_page=False)
-        out["screenshot"] = str(shot)
-    except Exception as exc:
-        LOG.debug("screenshot failed: %s", exc)
-    try:
-        html = paths.artifacts / f"{stamp}.html"
-        html.write_text(page.content(), encoding="utf-8")
-        out["html"] = str(html)
-    except Exception as exc:
-        LOG.debug("html dump failed: %s", exc)
-    if out:
-        LOG.info("saved failure artifacts for %r: %s", tag, ", ".join(out.values()))
-    return out

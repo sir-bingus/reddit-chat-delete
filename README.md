@@ -1,245 +1,200 @@
-# reddit-chat-image-purge
+# reddit-chat-cleanup
 
-Bulk-deletes **your own** image attachments across every conversation in Reddit chat.
-It drives a real browser: enumerates your conversations, opens each one, scrolls all the
-way back to the oldest message so Reddit lazy-loads the full history, and removes every
-image you sent — leaving conversations with people on your protected list untouched.
+Deletes your own content from Reddit chat: the attachments you sent, or every
+message you sent, and optionally leaves the conversation afterwards. People you
+list as protected are never touched.
 
-**Dry run by default.** Nothing is deleted until you pass `--execute`.
+It talks to the API behind Reddit chat rather than clicking through the web UI,
+so a full pass over ~1000 conversations takes minutes rather than hours.
 
-Verified against the live site in September 2026.
+**Deleting is permanent.** Reddit's own wording is *"removed for everyone in
+this chat, you can't undo this."* Leaving a conversation is visible to the other
+person and cannot be undone either.
 
-## Setup
+---
 
-```bash
-cd ~/Documents/reddit-chat-image-purge
-python3 -m venv .venv && .venv/bin/pip install -r requirements.txt && .venv/bin/playwright install chromium
-```
-
-## Use
-
-1. List the people you want to protect in `skip_users.txt`, one per line
-   (`u/` prefix optional, case-insensitive).
-
-2. Dry run. A Chromium window opens; log into Reddit in it once — the session is saved
-   in `.browser-profile/` and reused by every later run.
-
-   ```bash
-   .venv/bin/python main.py -v
-   ```
-
-3. When the dry-run report looks right:
-
-   ```bash
-   .venv/bin/python main.py --execute -v
-   ```
-
-**Deletion is permanent** — Reddit's own dialog says "removed for everyone in this chat,
-you can't undo this."
-
-A cautious first live run, capped at three deletions:
+## TL;DR
 
 ```bash
-.venv/bin/python main.py --execute --max-deletes-total 3 --keep-open -v
+./setup.sh
 ```
 
-### Scale and parallel runs
-
-A conversation takes roughly **10–12 seconds** (open, scroll back through its history,
-check each image). This account has **801 conversations**, so one window is about
-2.5–3 hours.
-
-To go faster, run several browser windows at once:
+Add anyone you want to protect to `skip_users.txt`, one username per line. Then:
 
 ```bash
-.venv/bin/python main.py --workers 4 -v
+./.venv/bin/python main.py scan               # look, change nothing
+./.venv/bin/python main.py images             # dry run: what would go
+./.venv/bin/python main.py images --execute   # actually delete
 ```
 
-The coordinator takes a one-off census of your conversations, splits them round-robin by
-conversation id, clones your logged-in profile once per worker (Chromium locks a profile
-to one process), and runs them in parallel, printing combined progress every few seconds.
-Four workers bring a full pass to roughly 45 minutes.
+That is the normal sequence: **scan -> dry run -> execute**. Every command is a
+dry run until you add `--execute`.
 
-Sharding is by **conversation id, not position**. "Worker N skips the first 20×N rows"
-looks simpler but the sidebar is virtualised and lazy-loaded, so a positional offset
-means something different in each window and drifts as rows load — you would get
-duplicated and missed conversations. Ids cannot drift; a test run confirmed the shards
-were disjoint and every conversation was opened exactly once. Workers reach their rooms
-directly at `reddit.com/chat/room/<id>`, so they never depend on sidebar position.
+Check what is left at any point, without touching the network:
 
-Be conservative with `--workers` when using `--execute`: several windows deleting at once
-is more load on Reddit than a person clicking, and rate limiting is a real risk. Four is
-a reasonable ceiling; start lower if you see failures.
+```bash
+./.venv/bin/python main.py status
+```
 
-Progress is saved after each conversation (`state.json`, or per-worker state files), so
-an interrupted run resumes where it stopped. `--no-resume` revisits everything.
+### Delete everything in one command
 
-Single-window runs need no census at all — they take the first unprocessed conversation
-already mounted in the sidebar and start immediately, scrolling for more only when they
-run out.
+```bash
+./.venv/bin/python main.py nuke --execute
+```
 
-## Options
+Scans, deletes every message you have ever sent, then leaves every conversation.
+It asks you to type `DELETE EVERYTHING` first. Add `--keep-conversations` to
+delete but stay in them.
+
+---
+
+## Commands
+
+| Command | What it does |
+| --- | --- |
+| `scan` | Reads every conversation and records what is there. Changes nothing. |
+| `images` | Deletes attachments you sent: images, video, files, audio. |
+| `messages` | Deletes every message you sent, attachments included. |
+| `hide` | Leaves conversations that have nothing of yours left. |
+| `status` | Prints what is known and what remains. No network calls. |
+| `nuke` | `scan` then `messages` then `hide`, behind a confirmation prompt. |
+
+They share one record of what has been done, so they compose freely:
+
+```bash
+./.venv/bin/python main.py images   --execute    # attachments first
+./.venv/bin/python main.py messages --execute    # then the text
+./.venv/bin/python main.py hide     --execute    # then leave the empty ones
+```
+
+The second run does not redo the first one's work, and stopping with Ctrl-C then
+restarting picks up where it left off.
+
+`images` and `messages` accept `--then-hide` to leave each conversation as soon
+as it is clean. `hide` on its own takes `--require images|messages` to say what
+must already be gone (default: everything you sent).
+
+### Options
 
 | Flag | Effect |
 | --- | --- |
-| `--execute` | Actually delete. Without it, dry run. |
-| `--skip-users FILE` | Protected-username file (default `./skip_users.txt`). |
+| `--execute` | Actually make changes. Without it, nothing is modified. |
+| `--skip-users FILE` | Protected-user list (default `./skip_users.txt`). |
 | `--skip USER` | Protect one username inline; repeatable. |
-| `--only TEXT` | Only conversations whose username contains this; repeatable. |
+| `--max-deletes N` | Stop after N deletions. Good for a cautious first run. |
 | `--max-rooms N` | Stop after N conversations. |
-| `--max-deletes-per-room N` / `--max-deletes-total N` | Blast-radius limits. |
-| `--delay MS` | Pause after each deletion (default 1200ms). |
-| `--state FILE` / `--no-resume` | Progress file for resuming long runs. |
-| `--hidden` | Hide the browser so no window sits on your screen (macOS). |
-| `--headless` | True headless. **Does not work** — see below. Kept for experimentation only. |
-| `--keep-open` | Leave the browser open at the end. |
-| `--workers N` | Run N browser windows in parallel on disjoint shards. |
-| `--census-only FILE` | Write the full conversation list to FILE and exit. |
-| `--inspect` | Dump live page structure and exit (see *When Reddit changes*). |
-| `-v` | Debug detail on the console. The log file always has everything. |
+| `--rescan` | Re-read history even for conversations already scanned. |
+| `--rescan-after H` | Treat scans older than H hours as stale. |
+| `--min-interval SEC` | Minimum gap between API calls, to go gently. |
+| `--show-window` | Show the browser used to pick up your session token. |
+| `--fresh-token` | Ignore the cached token and get a new one. |
+| `-v` | More console detail; the log file always has everything. |
 
-## Running it without windows in your face
+A cautious first live run:
 
 ```bash
-.venv/bin/python main.py --hidden -v
+./.venv/bin/python main.py images --execute --max-deletes 3 -v
 ```
 
-Reddit's chat **cannot** be driven in true headless Chromium. Tested directly: both the
-old headless shell and Chromium's new headless mode load `reddit.com/chat/` and render an
-empty shell — zero conversations, zero messages — while the same profile in a normal
-window shows 19 conversations and a full timeline. `--headless` therefore stays in the
-CLI only as an experiment hook, and warns when used.
+---
 
-`--hidden` is the working alternative: a completely normal browser, hidden by the OS right
-after launch (macOS `System Events`), with Chromium's occlusion and timer throttling
-disabled so the virtualised lists keep painting while off-screen. Same renderer, same code
-path, same results — verified by running the same conversations visible and hidden and
-comparing every per-conversation outcome.
+## Protected users
 
-Two caveats:
+Put usernames in `skip_users.txt`:
 
-* macOS ignores `--window-position`, so parking the window off-screen does not work; the
-  window genuinely has to be hidden by the OS.
-* Hiding uses AppleScript, which may need Terminal to have Accessibility permission
-  (System Settings → Privacy & Security → Accessibility). If it is refused, the run
-  continues normally with the window visible and says so — it never fails the run.
-* `--hidden` is macOS-only. Elsewhere it warns and stays visible.
+```
+some_friend
+u/AnotherPerson
+```
 
-It is inherited by `--workers`, so parallel runs hide every window too.
+Matching ignores case and an optional `u/`, and matches whole usernames, so
+`bob` does not also protect `bobcat_99`.
 
-## How it decides what to delete
+Protection is re-checked on **every run**, not only when a conversation was
+first scanned, so adding a name later still protects conversations scanned
+before you added it. If a conversation's participants cannot be identified at
+all and a protected list is in force, that conversation is skipped rather than
+risked.
 
-* **Only your own messages.** Reddit's hover toolbar offers a **Delete** button on your
-  messages and **Report** on other people's. The tool hovers each image message, reads
-  that toolbar, and only proceeds when it finds Delete. It cannot delete other people's
-  images and does not try.
-* **Only images.** Detected structurally via `.image-message` / `rs-image` on the message
-  body, not by guessing at image sizes. Text messages are never touched.
-* **Protected users are checked twice.** First against the conversation's sidebar entry
-  (`aria-label="Direct chat with <user>"`), before it is even opened. Then again from
-  inside, against the usernames that actually posted — which also covers group chats and
-  members not named in the sidebar label. The protected list is matched on whole
-  username tokens, so `bob` does not protect `bobcat_99`, and never against message
-  previews, so a preview mentioning someone cannot cause a wrong skip.
-* **Fail-safe.** If a protected list is in force and the tool cannot identify *anyone*
-  in a conversation, it skips that conversation rather than risk it.
+---
 
-## Logging
+## How it works
+
+Reddit chat is a Matrix client. The web app talks to `matrix.redditspace.com`,
+and so does this:
+
+- **history** - one request returns ~100 messages, so there is no scrolling
+- **ownership** - each event carries its `sender`, so "did I send this?" is a
+  fact rather than an inference
+- **deletion** - one `PUT .../redact/{eventId}` per message
+
+A browser is used for exactly one thing: getting a session token. Reddit's chat
+credentials are not in `localStorage`, so the real client is launched briefly
+and the token read from a request it makes. The token is then cached
+(owner-only, git-ignored) and reused, so most runs need no browser at all.
+
+There is no bulk-delete endpoint - the gateway advertises Matrix v1.2 with no
+redaction extensions - so it is one call per message. When Reddit rate-limits
+us it replies with `retry_after_ms`, and we wait exactly that long.
+
+A scan records **all** your messages, not just attachments, because paging the
+history costs the same either way. One scan therefore serves an `images` run, a
+`messages` run, and the question of whether a conversation is finished.
+Deleting never re-reads history; it works from what the scan recorded.
+
+### Layout
+
+```
+main.py               the CLI: scan / images / messages / hide / status / nuke
+rcip/runner.py        the engine: scan, delete, hide
+rcip/store.py         the shared record of what is known and done
+rcip/targets.py       what counts as deletable, in one place
+rcip/api.py           Matrix client
+rcip/auth.py          session token, harvested once then cached
+rcip/browser.py       the browser, used only for that token
+rcip/config.py        protected-user list and name matching
+rcip/logging_setup.py console log, run log, audit trail
+tests/                behaviour tests; no Reddit account needed
+```
+
+---
+
+## Logs
 
 Every run writes `reports/<timestamp>/`:
 
 | File | Contents |
 | --- | --- |
-| `run.log` | Full DEBUG trace: every conversation, scroll round, hover, toolbar reading, decision, plus browser console messages, page errors and failed requests. |
-| `audit.jsonl` | One JSON record per image considered — conversation, participants, URL, outcome (`deleted`, `would-delete`, `not-deletable`, `no-toolbar`, `no-confirm-button`, `delete-unconfirmed`) — plus every room-level decision and skip reason. |
-| `artifacts/*.png`, `*.html` | Screenshot + page HTML captured automatically whenever a step fails. |
+| `run.log` | Full trace of the run at DEBUG level. |
+| `audit.jsonl` | One JSON record per decision: scans, skips, deletions, failures. |
 
 ```bash
-# what would this dry run have deleted?
-jq -r 'select(.event=="image" and .outcome=="would-delete") | "\(.user)\t\(.url)"' reports/*/audit.jsonl
+# what was deleted, and where
+jq -r 'select(.event=="target" and .outcome=="deleted") | .room' reports/*/audit.jsonl | sort | uniq -c
 
-# tally outcomes
-jq -r 'select(.event=="image") | .outcome' reports/*/audit.jsonl | sort | uniq -c
-
-# why was a conversation skipped?
-jq -r 'select(.event=="room_skipped") | "\(.user)\t\(.reason)\t\(.matched // "")"' reports/*/audit.jsonl
+# which conversations were skipped, and why
+jq -r 'select(.event=="room_skipped") | .reason' reports/*/audit.jsonl | sort | uniq -c
 ```
 
-## The DOM it drives
+---
 
-Reddit's chat is a set of custom elements using **shadow DOM**, with **two virtualised
-lists** — only ~20 rows of each exist at any moment. Everything is therefore keyed on
-server-side ids rather than DOM nodes:
+## Requirements and limitations
 
-```
-rs-rooms-nav > rs-virtual-scroll                 <- sidebar scroller (virtualised)
-  rs-rooms-nav-room[room="!id:reddit.com"]       <- one conversation (shadow DOM)
-    a[aria-label="Direct chat with <username>"]
-
-rs-timeline[room] > rs-virtual-scroll-dynamic    <- the timeline IS this element
-  rs-timeline-event[data-id="$eventId"]          <- one message (shadow DOM)
-    div.room-message.regular
-      span.user-name                             <- sender
-      div.room-message-body.image-message        <- image attachment
-  rs-timeline-event-menu                         <- hover toolbar: …/Delete|Report
-```
-
-Three traps worth knowing if you maintain this:
-
-* `rs-virtual-scroll-dynamic` is itself the scrolling element. Its wrapper reports
-  `scrollHeight == clientHeight`, so driving the wrapper makes scroll-back a silent no-op.
-* Every lookup must pierce shadow roots or it finds nothing.
-* Navigation and paging are driven by **elements**, not pixel offsets:
-  `element.scrollIntoView()` on the last sidebar row or the oldest message. Pixel
-  arithmetic against a virtualised list skips windows that were never rendered — that bug
-  made a single enumeration pass report anywhere from 387 to 653 of the true 801
-  conversations, varying run to run.
-
-## When Reddit changes its markup
-
-All DOM knowledge is isolated in [`rcip/dom.js`](rcip/dom.js). If a run finds zero
-conversations or zero images:
-
-```bash
-.venv/bin/python main.py --inspect
-```
-
-That prints and saves live element counts, scroller geometry and every `rs-*` tag on the
-page. `tools/explore.py` goes further, finding repeated sibling structures without
-knowing any class names — useful if the element names change wholesale.
+- **macOS and Linux.** Windows is not supported: the record file uses `fcntl`
+  for locking, which does not exist there, so it fails on import.
+- Hiding the browser window is macOS-only. Elsewhere it warns and stays visible.
+- Reddit chat does not render in headless Chromium at all - verified in both the
+  old headless shell and the new mode - which is why a real window is used for
+  the token, hidden where the OS allows it.
+- This uses an internal API that Reddit does not document and may change without
+  notice.
 
 ## Tests
 
 ```bash
-.venv/bin/python tests/test_smoke.py
+for t in tests/test_*.py; do ./.venv/bin/python "$t"; done
 ```
 
-Runs the real engine against `tests/fixture_chat.html`, which replicates Reddit's actual
-markup — custom elements, open shadow roots, both virtualised scrollers, lazily-loaded
-older history, the Delete/Report hover toolbar and the "Yes, Delete" modal. It checks
-that the protected list is honoured (including protecting a group chat via its second
-member), that lazily-loaded history is swept, that dry run deletes nothing, and that
-execute deletes exactly the deletable images. No Reddit account involved.
-
-## Layout
-
-```
-main.py               CLI, run setup, summary
-rcip/browser.py       persistent Chromium profile, login gate, helper injection
-rcip/purge.py         conversation walk, scroll-back, ownership check, delete flow
-rcip/dom.js           all DOM knowledge (injected into the page)
-rcip/enumerate.py     one-off conversation census (only used to shard parallel work)
-rcip/parallel.py      coordinator: profile cloning, sharding, worker supervision
-rcip/config.py        options, protected-user matching
-rcip/logging_setup.py run log, audit JSONL, failure artifacts
-tools/explore.py      structural recon for when the markup changes
-tests/                fixture replicating the real DOM + end-to-end test
-```
-
-## Caveats
-
-* Reddit's chat app does not render in headless Chromium — runs use a visible window.
-* Conversations are enumerated by scrolling the sidebar; the count grows as it loads
-  (this account showed 533 → 653 across runs as more of the list was reached).
-* Deleting removes the message for everyone in the chat. Reddit may keep the underlying
-  media on its CDN afterwards.
+They cover the protected list (including a name added after scanning), what each
+run kind selects, sequencing and resume, and concurrent writes to the record.
+None of them touch Reddit.
