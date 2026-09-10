@@ -46,9 +46,10 @@ def shard(rooms: list[dict], n: int) -> list[list[dict]]:
 
 
 def run_workers(rooms: list[dict], n: int, paths, base_argv: list[str],
-                master_profile: Path, poll_s: float = 5.0) -> dict:
+                master_profile: Path, state_file: Path, poll_s: float = 5.0) -> dict:
     work = paths.dir / "workers"
     work.mkdir(parents=True, exist_ok=True)
+    state_file.parent.mkdir(parents=True, exist_ok=True)
     shards = shard(rooms, n)
 
     LOG.info("preparing %d browser profile(s) (copying the logged-in session)...", n)
@@ -67,7 +68,9 @@ def run_workers(rooms: list[dict], n: int, paths, base_argv: list[str],
                 "--rooms-file", str(rooms_file),
                 "--profile", str(profile),
                 "--reports", str(wdir / "reports"),
-                "--state", str(wdir / "state.json")]
+                # Every worker writes the same shared, locked state file, so
+                # progress is never split across files that need merging.
+                "--state", str(state_file)]
         LOG.info("  worker %d: %d conversation(s)", i, len(part))
         log_fh = (wdir / "console.log").open("w", encoding="utf-8")
         procs.append({"i": i, "p": subprocess.Popen(argv, stdout=log_fh, stderr=subprocess.STDOUT),

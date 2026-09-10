@@ -12,7 +12,9 @@ other people's offer *Report*. Nothing else is treated as deletable.
 
 from __future__ import annotations
 
+import fcntl
 import json
+import os
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -48,30 +50,99 @@ class Purger:
         self.state_path: Path | None = cfg.state_file
         self.done_rooms: set[str] = self._load_state()
         self.skipped_rooms: set[str] = set()   # skipped/failed this run; not retried
+        self._room_failures = 0                # deletions that failed in the current room
+        self._me: str = ""                     # our own reddit display name
+        self.unresolved: dict[str, set[str]] = {}   # room -> image ids still undecided
+        self._full_sweep = True                # did this conversation get fully walked?
 
     # ------------------------------------------------------------------ state
 
     def _load_state(self) -> set[str]:
-        if not self.state_path or not self.state_path.exists():
+        """Everything finished before now, from this run's file and its siblings.
+
+        Parallel runs write one progress file per worker. A later run - single
+        window or parallel with a different worker count - has to see all of
+        them, otherwise it happily redoes hundreds of finished conversations.
+        """
+        if not self.state_path:
             return set()
-        try:
-            data = json.loads(self.state_path.read_text(encoding="utf-8"))
-            rooms = set(data.get("done_rooms", []))
-            LOG.info("resuming: %d conversation(s) already completed in a previous run",
+        rooms: set[str] = set()
+        self.unresolved: dict[str, set[str]] = {}
+        sources = [self.state_path]
+        # legacy per-worker files from before runs shared one state file
+        sources += sorted(self.state_path.parent.glob("state-w*.json"))
+        for path in sources:
+            if not path.exists():
+                continue
+            try:
+                data = json.loads(path.read_text(encoding="utf-8"))
+                found = set(data.get("done_rooms", []))
+                rooms |= found
+                for rid, ids in (data.get("unresolved") or {}).items():
+                    self.unresolved.setdefault(rid, set()).update(ids)
+                LOG.debug("  %s: %d conversation(s)", path.name, len(found))
+            except Exception as exc:
+                LOG.warning("could not read state file %s: %s", path, exc)
+        # A conversation holding images we never resolved is not finished,
+        # whatever an earlier pass recorded. Otherwise those images are lost:
+        # the conversation is skipped forever and nobody ever looks again.
+        blocked = {r for r, ids in self.unresolved.items() if ids}
+        revisit = rooms & blocked
+        rooms -= blocked
+        if rooms:
+            LOG.info("resuming: %d conversation(s) already completed in earlier run(s)",
                      len(rooms))
-            return rooms
-        except Exception as exc:
-            LOG.warning("could not read state file %s: %s", self.state_path, exc)
-            return set()
+        if revisit:
+            LOG.info("%d conversation(s) will be revisited: they still hold %d image(s) "
+                     "whose ownership was never resolved",
+                     len(revisit), sum(len(self.unresolved[r]) for r in revisit))
+        return rooms
 
     def _save_state(self) -> None:
+        """Merge our progress into the shared state file, under a lock.
+
+        Every run and every parallel worker writes to the same file, so it is
+        always the single source of truth and never needs merging by hand.
+        Concurrent writers take an exclusive lock and re-read before writing,
+        so nobody clobbers anybody else's conversations.
+        """
         if not self.state_path:
             return
         try:
-            self.state_path.write_text(
-                json.dumps({"done_rooms": sorted(self.done_rooms),
-                            "updated": time.strftime("%Y-%m-%dT%H:%M:%S")}, indent=1),
-                encoding="utf-8")
+            self.state_path.parent.mkdir(parents=True, exist_ok=True)
+            with open(self.state_path, "a+", encoding="utf-8") as fh:
+                fcntl.flock(fh.fileno(), fcntl.LOCK_EX)
+                try:
+                    fh.seek(0)
+                    raw = fh.read().strip()
+                    existing = set()
+                    if raw:
+                        try:
+                            existing = set(json.loads(raw).get("done_rooms", []))
+                        except json.JSONDecodeError:
+                            LOG.warning("state file was corrupt; rebuilding it from this "
+                                        "run's progress")
+                    merged = existing | self.done_rooms
+                    self.done_rooms = merged      # adopt others' progress too
+                    prior = {}
+                    if raw:
+                        try:
+                            prior = json.loads(raw).get("unresolved") or {}
+                        except json.JSONDecodeError:
+                            prior = {}
+                    combined = {r: set(v) for r, v in prior.items()}
+                    for r, ids in self.unresolved.items():
+                        combined[r] = set(ids) if ids else set()
+                    combined = {r: sorted(v) for r, v in combined.items() if v}
+                    fh.seek(0)
+                    fh.truncate()
+                    json.dump({"done_rooms": sorted(merged),
+                               "unresolved": combined,
+                               "updated": time.strftime("%Y-%m-%dT%H:%M:%S")}, fh, indent=1)
+                    fh.flush()
+                    os.fsync(fh.fileno())
+                finally:
+                    fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
         except Exception as exc:
             LOG.debug("could not write state file: %s", exc)
 
@@ -112,8 +183,7 @@ class Purger:
                 continue
             try:
                 self._process_room(rid, user, room)
-                self.done_rooms.add(rid)
-                self._save_state()
+                self._settle_room(rid)
             except Exception as exc:
                 self.stats.failures += 1
                 self.stats.errors.append(f"{who}: {exc}")
@@ -185,8 +255,7 @@ class Purger:
 
             try:
                 self._process_room(rid, user, room)
-                self.done_rooms.add(rid)
-                self._save_state()
+                self._settle_room(rid)
             except Exception as exc:
                 self.stats.failures += 1
                 self.stats.errors.append(f"{who}: {exc}")
@@ -208,7 +277,16 @@ class Purger:
     # ---------------------------------------------------------------- a room
 
     def _process_room(self, rid: str, user: str, room: dict | None = None) -> None:
+        self._room_failures = 0
+        self._full_sweep = True
         self._open_room(rid)
+        if not self._me:
+            self._me = self.b.rcip("currentUserName()") or ""
+            if self._me:
+                LOG.info("signed in as u/%s", self._me)
+            else:
+                LOG.warning("could not read your own username; ownership will rely on the "
+                            "Delete/Report toolbar alone")
 
         if self._participant_check(rid, user) is False:
             return
@@ -225,6 +303,30 @@ class Purger:
             return
 
         self._sweep(rid, user)
+
+    def _settle_room(self, rid: str) -> None:
+        """Decide whether this conversation is finished, and record it.
+
+        Finished means: nothing failed this pass, we walked the whole history
+        rather than stopping early, and no image here is still undecided from
+        any previous pass. The last condition matters - without it a
+        conversation that failed once and later passed without re-encountering
+        those images gets marked done and they are never looked at again.
+        """
+        leftover = {i for i in self.unresolved.get(rid, set())}
+        if self._room_failures:
+            LOG.warning("  %d image(s) unresolved here; keeping this conversation on "
+                        "the list for a rerun", self._room_failures)
+        elif not self._full_sweep:
+            LOG.warning("  did not reach the whole history here; keeping this "
+                        "conversation on the list for a rerun")
+        elif leftover:
+            LOG.warning("  %d image(s) from an earlier pass are still undecided; "
+                        "keeping this conversation on the list", len(leftover))
+        else:
+            self.unresolved.pop(rid, None)
+            self.done_rooms.add(rid)
+        self._save_state()
 
     def _participant_check(self, rid: str, user: str, second_pass: bool = False) -> bool:
         """False => do not touch this conversation.
@@ -267,6 +369,10 @@ class Purger:
         place and the next conversation is already mounted. Navigating by URL
         reloads everything and sends the list back to the top.
         """
+        # The fixed settle below is deliberate. It is not just waiting for the
+        # page: it spaces requests out, and Reddit rate-limits this account
+        # hard (thousands of 429s per run). Polling instead would pack calls
+        # closer together and make the throttling worse, so the pause stays.
         if self.cfg.open_by_click and self.b.rcip("openRoomByClick(a)", rid):
             self.b.page.wait_for_timeout(self.cfg.room_settle_ms)
             self.b.ensure_injected()
@@ -306,6 +412,7 @@ class Purger:
                 return
         LOG.warning("  stopped after --max-scroll-rounds=%d; older messages may remain",
                     self.cfg.max_scroll_rounds)
+        self._full_sweep = False
 
     def _sweep(self, rid: str, user: str) -> None:
         """Oldest -> newest, handling every image message on the way."""
@@ -361,6 +468,18 @@ class Purger:
         lo, hi = box["y"] - 30, box["y"] + box["h"] + 30
         return [b for b in labels if lo <= b["box"]["y"] <= hi]
 
+    def _wait_out_rate_limit(self) -> None:
+        """Reddit 429s the endpoint that carries deletions. If we have just been
+        throttled, pause before touching it again."""
+        last = getattr(self.b.page, "_rcip_last_429", 0)
+        if not last:
+            return
+        since = time.time() - last
+        if since < self.cfg.rate_limit_cooldown_s:
+            wait = self.cfg.rate_limit_cooldown_s - since
+            LOG.info("    rate limited by Reddit %0.0fs ago - waiting %0.0fs", since, wait)
+            self.b.page.wait_for_timeout(int(wait * 1000))
+
     def _handle_image(self, rid: str, user: str, ev: dict) -> str:
         ev_id = ev["id"]
         url0 = (ev.get("urls") or [""])[0]
@@ -369,24 +488,61 @@ class Purger:
 
         def done(outcome: str, **extra) -> str:
             self.audit.write("image", outcome=outcome, **base, **extra)
+            bucket = self.unresolved.setdefault(rid, set())
+            if outcome in ("deleted", "not-deletable", "would-delete"):
+                bucket.discard(ev_id)          # settled, one way or the other
+            else:
+                bucket.add(ev_id)              # still owed an answer
             return outcome
 
-        buttons = self._hover_menu(ev_id)
-        if not buttons:
-            buttons = self._hover_menu(ev_id)  # one retry; the toolbar can lag
-        labels = [(b["label"] or "") for b in buttons]
+        # Ownership needs positive evidence either way. Reddit shows Delete on
+        # your messages and Report on everyone else's; under rate limiting the
+        # toolbar can render incompletely, and treating "no Delete button" as
+        # "not yours" would silently skip your own images. So an unreadable
+        # toolbar is a failure to retry, never a decision.
+        delete_btn = labels = sender = None
+        verdict = "unknown"
+        for attempt in range(1, self.cfg.ownership_attempts + 1):
+            self._wait_out_rate_limit()
+            buttons = self._hover_menu(ev_id)
+            labels = [(b["label"] or "").strip() for b in buttons]
+            low = {x.lower() for x in labels}
+            sender = self.b.rcip("eventSender(a)", ev_id)
+            mine_by_sender = bool(sender and self._me
+                                  and sender.strip().lower() == self._me.strip().lower())
 
-        if not buttons:
-            LOG.warning("    no action toolbar appeared for %s", ev_id[:14])
-            self.stats.failures += 1
-            dump_artifacts(page, self.paths, f"no-toolbar-{ev_id[:8]}")
-            return done("no-toolbar")
+            if "delete" in low:
+                delete_btn = next(b for b in buttons
+                                  if (b["label"] or "").strip().lower() == "delete")
+                verdict = "mine"
+                break
+            if "report" in low and not mine_by_sender:
+                verdict = "theirs"
+                break
+            if "report" in low and mine_by_sender:
+                # contradictory: the sender is us but Delete is missing
+                LOG.debug("    attempt %d: toolbar says Report but sender is you", attempt)
+            elif not buttons:
+                LOG.debug("    attempt %d: no toolbar appeared", attempt)
+            else:
+                LOG.debug("    attempt %d: toolbar incomplete (%s)", attempt, "/".join(labels))
+            if attempt < self.cfg.ownership_attempts:
+                page.mouse.move(5, 5)   # force the toolbar to re-render on next hover
+                page.wait_for_timeout(self.cfg.ownership_retry_ms * attempt)
 
-        delete_btn = next((b for b in buttons if (b["label"] or "").strip().lower() == "delete"), None)
-        if not delete_btn:
+        if verdict == "theirs":
             self.stats.images_not_mine += 1
-            LOG.info("    - not yours (toolbar offers %s) - left alone", "/".join(labels) or "nothing")
-            return done("not-deletable", labels=labels)
+            LOG.info("    - not yours (sent by u/%s) - left alone", sender or "?")
+            return done("not-deletable", labels=labels, sender=sender)
+
+        if verdict == "unknown":
+            self.stats.failures += 1
+            self._room_failures += 1
+            LOG.warning("    could not tell whose message this is after %d attempt(s) "
+                        "(toolbar: %s, sender: %s) - leaving it and flagging the "
+                        "conversation for a rerun",
+                        self.cfg.ownership_attempts, "/".join(labels) or "none", sender or "?")
+            return done("ownership-unknown", labels=labels, sender=sender)
 
         if not self.cfg.execute:
             self.stats.images_would_delete += 1
@@ -394,29 +550,54 @@ class Purger:
             return done("would-delete")
 
         LOG.info("    deleting %s", url0[:80] or ev_id[:14])
-        bb = delete_btn["box"]
-        page.mouse.click(bb["x"] + bb["w"] // 2, bb["y"] + bb["h"] // 2)
-        page.wait_for_timeout(self.cfg.dialog_pause_ms)
 
-        confirm = next((b for b in (self.b.rcip("dialogButtons()") or [])
-                        if b["text"].strip().lower() in ("yes, delete", "yes delete", "delete")), None)
-        if not confirm:
-            LOG.warning("    no confirmation button found; leaving the message alone")
-            page.keyboard.press("Escape")
-            self.stats.failures += 1
-            dump_artifacts(page, self.paths, f"no-confirm-{ev_id[:8]}")
-            return done("no-confirm-button")
+        for attempt in range(1, self.cfg.delete_attempts + 1):
+            self._wait_out_rate_limit()
+            if attempt > 1:
+                # re-hover: the toolbar is gone and the box may have moved
+                buttons = self._hover_menu(ev_id) or self._hover_menu(ev_id)
+                delete_btn = next((b for b in buttons
+                                   if (b["label"] or "").strip().lower() == "delete"), None)
+                if not delete_btn:
+                    if not self.b.rcip("eventExists(a)", ev_id):
+                        self.stats.images_deleted += 1
+                        return done("deleted", attempts=attempt)
+                    LOG.warning("    retry %d: Delete no longer offered", attempt)
+                    break
 
-        cb = confirm["box"]
-        page.mouse.click(cb["x"] + cb["w"] // 2, cb["y"] + cb["h"] // 2)
+            bb = delete_btn["box"]
+            page.mouse.click(bb["x"] + bb["w"] // 2, bb["y"] + bb["h"] // 2)
+            page.wait_for_timeout(self.cfg.dialog_pause_ms)
 
-        for _ in range(24):
-            page.wait_for_timeout(250)
-            if not self.b.rcip("eventExists(a)", ev_id):
-                self.stats.images_deleted += 1
-                return done("deleted")
+            confirm = next((b for b in (self.b.rcip("dialogButtons()") or [])
+                            if b["text"].strip().lower() in ("yes, delete", "yes delete", "delete")),
+                           None)
+            if not confirm:
+                LOG.warning("    no confirmation button found; leaving the message alone")
+                page.keyboard.press("Escape")
+                self.stats.failures += 1
+                return done("no-confirm-button", attempts=attempt)
+
+            cb = confirm["box"]
+            before_429 = getattr(page, "_rcip_429_count", 0)
+            page.mouse.click(cb["x"] + cb["w"] // 2, cb["y"] + cb["h"] // 2)
+
+            for _ in range(self.cfg.delete_confirm_polls):
+                page.wait_for_timeout(250)
+                if not self.b.rcip("eventExists(a)", ev_id):
+                    self.stats.images_deleted += 1
+                    return done("deleted", attempts=attempt)
+
+            throttled = getattr(page, "_rcip_429_count", 0) > before_429
+            if attempt < self.cfg.delete_attempts:
+                backoff = self.cfg.delete_retry_backoff_s * attempt * (3 if throttled else 1)
+                LOG.warning("    still present after attempt %d%s - retrying in %ds",
+                            attempt, " (rate limited)" if throttled else "", backoff)
+                page.keyboard.press("Escape")
+                page.wait_for_timeout(backoff * 1000)
 
         self.stats.failures += 1
-        LOG.warning("    message still present after confirming - see artifacts")
-        dump_artifacts(page, self.paths, f"not-gone-{ev_id[:8]}")
-        return done("delete-unconfirmed")
+        self._room_failures += 1
+        LOG.warning("    could not delete after %d attempt(s); leaving it in place",
+                    self.cfg.delete_attempts)
+        return done("delete-unconfirmed", attempts=self.cfg.delete_attempts)

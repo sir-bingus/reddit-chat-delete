@@ -1,0 +1,226 @@
+"""Direct client for the Matrix API behind Reddit chat.
+
+The web UI talks to matrix.redditspace.com; so can we. Compared with driving
+the browser this is roughly fifty times faster (~0.2s vs ~11s per
+conversation), sees every room rather than whatever the virtualised sidebar
+happened to render, and settles ownership from the event's `sender` instead of
+inferring it from which buttons a hover toolbar drew.
+
+Credentials come from a short browser launch: we read the bearer token off a
+request the real client makes. Nothing is stored on disk.
+"""
+
+from __future__ import annotations
+
+import json
+import time
+import urllib.error
+import urllib.parse
+import urllib.request
+from dataclasses import dataclass, field
+
+from .logging_setup import LOG
+
+MEDIA_MSGTYPES = {"m.image", "m.video", "m.file", "m.audio"}
+DEFAULT_BASE = "https://matrix.redditspace.com"
+
+
+class AuthExpired(RuntimeError):
+    """The access token stopped working mid-run."""
+
+
+@dataclass
+class Limits:
+    max_retries: int = 6
+    backoff_s: float = 1.0
+    min_interval_s: float = 0.0     # optional politeness delay between calls
+
+
+@dataclass
+class MatrixClient:
+    token: str
+    base: str = DEFAULT_BASE
+    limits: Limits = field(default_factory=Limits)
+    on_reauth: object = None        # callable returning a fresh token
+    _last_call: float = 0.0
+    rate_limited: int = 0
+    calls: int = 0
+
+    # ----------------------------------------------------------------- plumbing
+
+    def _url(self, path: str, params: dict | None = None) -> str:
+        q = ("?" + urllib.parse.urlencode(params)) if params else ""
+        return f"{self.base}{path}{q}"
+
+    def request(self, method: str, path: str, params: dict | None = None,
+                body: dict | None = None):
+        """One API call, honouring Matrix's own rate-limit instructions.
+
+        Matrix answers 429 with `retry_after_ms`, so we can wait exactly as
+        long as the server asks instead of guessing - the reason this backs off
+        far more gracefully than the UI did.
+        """
+        for attempt in range(1, self.limits.max_retries + 1):
+            if self.limits.min_interval_s:
+                gap = time.monotonic() - self._last_call
+                if gap < self.limits.min_interval_s:
+                    time.sleep(self.limits.min_interval_s - gap)
+            data = json.dumps(body).encode() if body is not None else None
+            req = urllib.request.Request(self._url(path, params), data=data, method=method)
+            req.add_header("Authorization", f"Bearer {self.token}")
+            if data is not None:
+                req.add_header("Content-Type", "application/json")
+            self._last_call = time.monotonic()
+            self.calls += 1
+            try:
+                with urllib.request.urlopen(req, timeout=45) as r:
+                    return json.loads(r.read() or b"{}")
+            except urllib.error.HTTPError as e:
+                raw = e.read()
+                try:
+                    payload = json.loads(raw or b"{}")
+                except Exception:
+                    payload = {}
+                if e.code == 429:
+                    self.rate_limited += 1
+                    wait = payload.get("retry_after_ms")
+                    wait = (wait / 1000) if wait else self.limits.backoff_s * attempt
+                    LOG.debug("rate limited; waiting %.1fs as instructed", wait)
+                    time.sleep(min(wait, 60))
+                    continue
+                if e.code in (401, 403) and payload.get("errcode") in (
+                        "M_UNKNOWN_TOKEN", "M_MISSING_TOKEN", "M_FORBIDDEN"):
+                    if self.on_reauth and attempt < self.limits.max_retries:
+                        LOG.warning("access token rejected; fetching a fresh one")
+                        self.token = self.on_reauth()
+                        continue
+                    raise AuthExpired(payload.get("error", "token rejected"))
+                if 500 <= e.code < 600 and attempt < self.limits.max_retries:
+                    time.sleep(self.limits.backoff_s * attempt)
+                    continue
+                raise RuntimeError(f"{method} {path} -> {e.code} {payload or raw[:120]}")
+            except urllib.error.URLError as e:
+                if attempt >= self.limits.max_retries:
+                    raise
+                LOG.debug("network error (%s); retrying", e)
+                time.sleep(self.limits.backoff_s * attempt)
+        raise RuntimeError(f"{method} {path}: giving up after {self.limits.max_retries} tries")
+
+    # -------------------------------------------------------------------- calls
+
+    def whoami(self) -> dict:
+        return self.request("GET", "/_matrix/client/v3/account/whoami")
+
+    def joined_rooms(self) -> list[str]:
+        return self.request("GET", "/_matrix/client/v3/joined_rooms").get("joined_rooms", [])
+
+    def members(self, room: str) -> dict[str, str]:
+        """user id -> Reddit username.
+
+        Reddit's gateway does not implement /joined_members (404) - only the
+        older /members, which returns m.room.member events.
+        """
+        path = f"/_matrix/client/v3/rooms/{urllib.parse.quote(room, safe='')}/members"
+        out = {}
+        for ev in (self.request("GET", path).get("chunk") or []):
+            uid = ev.get("state_key")
+            content = ev.get("content") or {}
+            if uid and content.get("membership") in (None, "join", "invite"):
+                out[uid] = content.get("displayname") or ""
+        return out
+
+
+    def iter_messages(self, room: str, page: int = 200):
+        """Every event in a room, newest first, following pagination."""
+        path = f"/_matrix/client/v3/rooms/{urllib.parse.quote(room, safe='')}/messages"
+        token = None
+        while True:
+            params = {"dir": "b", "limit": page}
+            if token:
+                params["from"] = token
+            body = self.request("GET", path, params)
+            chunk = body.get("chunk") or []
+            for ev in chunk:
+                yield ev
+            token = body.get("end")
+            if not token or not chunk:
+                return
+
+    def redact(self, room: str, event_id: str, reason: str | None = None) -> str:
+        txn = f"rcip{int(time.time() * 1000)}{abs(hash(event_id)) % 10000}"
+        path = (f"/_matrix/client/v3/rooms/{urllib.parse.quote(room, safe='')}"
+                f"/redact/{urllib.parse.quote(event_id, safe='')}/{txn}")
+        body = {"reason": reason} if reason else {}
+        return self.request("PUT", path, body=body).get("event_id", "")
+
+    def leave(self, room: str) -> None:
+        self.request("POST", f"/_matrix/client/v3/rooms/{urllib.parse.quote(room, safe='')}/leave",
+                     body={})
+
+    def forget(self, room: str) -> None:
+        self.request("POST", f"/_matrix/client/v3/rooms/{urllib.parse.quote(room, safe='')}/forget",
+                     body={})
+
+
+# ------------------------------------------------------------------ token grab
+
+def harvest_token(profile_dir, hidden: bool = True, timeout_s: int = 120) -> tuple[str, str]:
+    """Read the bearer token off a request the real web client makes.
+
+    Cheaper and far more robust than reverse-engineering where the client
+    stashes its credentials, which are not in localStorage.
+    """
+    from .browser import Browser
+
+    cap: dict[str, str] = {}
+
+    def on_request(r):
+        if "_matrix" not in r.url:
+            return
+        for k, v in r.headers.items():
+            if k.lower() == "authorization" and v.lower().startswith("bearer "):
+                cap.setdefault("token", v.split(" ", 1)[1])
+                cap.setdefault("base", r.url.split("/_matrix")[0])
+
+    LOG.info("starting a browser briefly to pick up your session token...")
+    with Browser(profile_dir, hidden=hidden) as b:
+        b.page.on("request", on_request)
+        b.open_chat()
+        if not b.wait_for_login(timeout_s):
+            raise RuntimeError("not logged in; cannot read a token")
+        for _ in range(20):
+            if "token" in cap:
+                break
+            b.page.wait_for_timeout(500)
+    if "token" not in cap:
+        raise RuntimeError("no Matrix token seen; is this the chat page?")
+    LOG.info("got a session token (%d chars) for %s", len(cap["token"]), cap["base"])
+    return cap["token"], cap.get("base", DEFAULT_BASE)
+
+
+def is_media(event: dict) -> bool:
+    c = event.get("content") or {}
+    return c.get("msgtype") in MEDIA_MSGTYPES
+
+
+def is_message(event: dict) -> bool:
+    return event.get("type") == "m.room.message" and bool(event.get("content"))
+
+
+def is_redacted(event: dict) -> bool:
+    return bool(event.get("unsigned", {}).get("redacted_because")) or not event.get("content")
+
+
+def members_from_events(events: list[dict]) -> dict[str, str]:
+    """Usernames gleaned from membership events already in a timeline page.
+
+    Saves a call per conversation when we do not need an authoritative list.
+    """
+    out = {}
+    for ev in events:
+        if ev.get("type") == "m.room.member":
+            uid = ev.get("state_key")
+            name = (ev.get("content") or {}).get("displayname")
+            if uid and name:
+                out[uid] = name
+    return out

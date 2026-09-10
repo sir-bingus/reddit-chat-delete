@@ -256,6 +256,27 @@
     return box(e);
   };
 
+  /** Who sent a given message.
+   *
+   * Consecutive messages from one person are grouped and only the first
+   * carries a name, so walk back to the nearest labelled message.
+   */
+  const eventSender = (id) => {
+    const e = deep(`rs-timeline-event[data-id="${cssEscape(id)}"]`)[0];
+    if (!e) return null;
+    const own = deep('.user-name, [class*="user-name"]', e)[0];
+    if (own) return txt(own).replace(/^u\//i, '');
+    let prev = e.previousElementSibling;
+    for (let i = 0; i < 60 && prev; i += 1) {
+      if (prev.tagName && prev.tagName.toLowerCase() === 'rs-timeline-event') {
+        const n = deep('.user-name, [class*="user-name"]', prev)[0];
+        if (n) return txt(n).replace(/^u\//i, '');
+      }
+      prev = prev.previousElementSibling;
+    }
+    return null;
+  };
+
   /** Visible confirmation-dialog buttons, anywhere in the document. */
   const dialogButtons = () => deep('button,[role="button"]')
     .filter((b) => shown(b) && txt(b).length <= 30)
@@ -288,7 +309,7 @@
     sidebarState, roomHeader, currentRoomId,
     currentUserName, roomParticipants,
     timelineState, scrollTimeline, advanceTimelineUp, advanceTimelineDown, imageEvents,
-    menuLabelsFor, eventBox, eventExists, scrollEventIntoView,
+    menuLabelsFor, eventSender, eventBox, eventExists, scrollEventIntoView,
     dialogButtons, dialogOpen, describe,
   };
 })();

@@ -10,6 +10,7 @@ Covers the things that would be expensive to get wrong on a live account:
 
 from __future__ import annotations
 
+import json
 import shutil
 import sys
 import tempfile
@@ -34,7 +35,27 @@ OWN_NO_GROUP = 7
 OTHERS_NO_GROUP = 1
 
 
-def run(execute: bool, skip: set[str], tmp: Path) -> Stats:
+def run_from_list(rooms: list[dict], tmp: Path, execute: bool = False) -> Stats:
+    """Drive conversations straight from a cached list, by URL."""
+    paths = new_run(tmp / "reports")
+    configure(paths, verbosity=2)
+    audit = Audit(paths.audit_file)
+    cfg = Config(execute=execute, headless=True, profile_dir=tmp / "profile",
+                 delete_delay_ms=40, scroll_pause_ms=90, room_settle_ms=900,
+                 hover_pause_ms=250, dialog_pause_ms=350, max_scroll_rounds=60,
+                 room_url_template=ROOM_URL, state_file=None, open_by_click=False,
+                 delete_retry_backoff_s=0, delete_confirm_polls=4)
+    stats = Stats()
+    with Browser(cfg.profile_dir, headless=True, chat_url=FIXTURE) as b:
+        b.open_chat()
+        assert b.wait_for_login(20), "fixture sidebar did not render"
+        Purger(b, cfg, audit, paths, stats).run_list(rooms)
+    audit.close()
+    return stats
+
+
+def run(execute: bool, skip: set[str], tmp: Path, only: list[str] | None = None,
+        state_file: Path | None = None) -> Stats:
     paths = new_run(tmp / "reports")
     configure(paths, verbosity=2)
     audit = Audit(paths.audit_file)
@@ -42,7 +63,9 @@ def run(execute: bool, skip: set[str], tmp: Path) -> Stats:
                  profile_dir=tmp / "profile", delete_delay_ms=40, scroll_pause_ms=90,
                  sidebar_pause_ms=60, room_settle_ms=900, hover_pause_ms=250,
                  dialog_pause_ms=350, max_scroll_rounds=60, max_sidebar_rounds=12,
-                 room_url_template=ROOM_URL, state_file=None)
+                 room_url_template=ROOM_URL, state_file=state_file,
+                 only_rooms=only or [], delete_retry_backoff_s=0,
+                 delete_confirm_polls=4)
     stats = Stats()
     with Browser(cfg.profile_dir, headless=True, chat_url=FIXTURE) as b:
         b.open_chat()
@@ -90,6 +113,36 @@ def main() -> int:
         print("\n=== 4. execute, no protected list ===")
         s = run(True, set(), tmp / "d")
         check("deleted", s.images_deleted, OWN_ALL)
+        check("failures", s.failures, 0)
+        print("\n=== 5. a delete that fails once then succeeds (rate limiting) ===")
+        s = run(True, set(), tmp / "e", only=["flaky_f"])
+        check("deleted after retry", s.images_deleted, 1)
+        check("failures", s.failures, 0)
+
+        print("\n=== 6. a delete that never takes ===")
+        state = tmp / "f" / "state.json"
+        state.parent.mkdir(parents=True, exist_ok=True)
+        s = run(True, set(), tmp / "f", only=["stuck_s"], state_file=state)
+        check("deleted", s.images_deleted, 0)
+        check("reported as a failure", s.failures, 1)
+        done = json.loads(state.read_text())["done_rooms"] if state.exists() else []
+        check("conversation NOT marked done (so a rerun retries it)",
+              "!stuck:reddit.com" in done, False)
+        print("\n=== 7. toolbar renders without Delete/Report (rate limiting) ===")
+        state7 = tmp / "g" / "state.json"
+        state7.parent.mkdir(parents=True, exist_ok=True)
+        s = run(True, set(), tmp / "g", only=["throt_t"], state_file=state7)
+        check("NOT written off as someone else's", s.images_not_mine, 0)
+        check("deleted (must not delete what it cannot identify)", s.images_deleted, 0)
+        check("flagged as a failure instead", s.failures, 1)
+        done7 = json.loads(state7.read_text())["done_rooms"] if state7.exists() else []
+        check("conversation left for a rerun", "!throttled:reddit.com" in done7, False)
+        print("\n=== 8. driving from a cached list by URL (no sidebar walk) ===")
+        cached = [{"room": "!alice:reddit.com", "user": "alice_x"},
+                  {"room": "!bob:reddit.com", "user": "bob_y"}]
+        s = run_from_list(cached, tmp / "h", execute=True)
+        check("both cached conversations processed", s.rooms_processed, 2)
+        check("deleted (alice 5 + bob 2)", s.images_deleted, 7)
         check("failures", s.failures, 0)
     finally:
         shutil.rmtree(tmp, ignore_errors=True)

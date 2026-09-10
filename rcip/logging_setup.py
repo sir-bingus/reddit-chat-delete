@@ -120,6 +120,11 @@ def attach_page_logging(page, audit: "Audit | None" = None) -> None:
                   req.failure if isinstance(req.failure, str) else getattr(req, "failure", None))
 
     def on_response(resp):
+        if resp.status == 429:
+            # Reddit throttling. Redactions ride the same endpoint as history
+            # paging, so a burst of these means deletions are being rejected.
+            page._rcip_last_429 = time.time()
+            page._rcip_429_count = getattr(page, "_rcip_429_count", 0) + 1
         if resp.status >= 400:
             LOG.debug("http %s %s", resp.status, resp.url[:160])
 

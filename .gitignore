@@ -1,11 +1,13 @@
 .browser-profile/
+.profiles/
 reports/
 selectors.local.json
 skip_users.txt
+state.json
+state-*.json
+chat-records.json
+chat-records.json.lock
+rooms.json
 __pycache__/
 *.pyc
 .venv/
-.profiles/
-state.json
-state.*.json
-rooms.json

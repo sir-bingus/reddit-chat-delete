@@ -35,6 +35,16 @@ const ROOMS = [
   { id: '!alice:reddit.com', user: 'alice_x',  mine: 3, theirs: 1, older: 2, group: false },
   { id: '!bob:reddit.com',   user: 'bob_y',    mine: 2, theirs: 0, older: 0, group: false },
   { id: '!carol:reddit.com', user: 'carol_z',  mine: 1, theirs: 1, older: 0, group: true  },
+  // deletion fails once then succeeds - what Reddit's rate limiting looks like
+  { id: '!flaky:reddit.com', user: 'flaky_f',  mine: 1, theirs: 0, older: 0, group: false,
+    failFirst: true },
+  // deletion never takes, however many times we confirm
+  { id: '!stuck:reddit.com', user: 'stuck_s',  mine: 1, theirs: 0, older: 0, group: false,
+    alwaysFail: true },
+  // toolbar renders WITHOUT Delete or Report, as it can under rate limiting.
+  // The image is ours, so it must never be written off as someone else's.
+  { id: '!throttled:reddit.com', user: 'throt_t', mine: 1, theirs: 0, older: 0, group: false,
+    partialToolbar: true },
 ];
 let seq = 0;
 const nextId = () => '$ev' + (++seq);
@@ -82,7 +92,11 @@ function showMenu(ev) {
   const msh = menu.attachShadow({ mode: 'open' });
   // real site: 4th button is Delete on your own messages, Report on others'
   const last = ev.dataset.mine === '1' ? 'Delete' : 'Report';
-  msh.innerHTML = ['Reply in thread', 'React', 'Copy Link', last]
+  // under throttling Reddit can paint the toolbar without its last action
+  const items = (currentRoom && currentRoom.partialToolbar)
+    ? ['Reply in thread', 'React', 'Copy Link']
+    : ['Reply in thread', 'React', 'Copy Link', last];
+  msh.innerHTML = items
     .map((l) => `<button class="menu-item cursor-pointer" aria-label="${l}"
         style="width:28px;height:28px">·</button>`).join('');
   msh.querySelectorAll('button').forEach((b) => {
@@ -103,7 +117,17 @@ function confirmDelete(ev) {
       <button>Cancel</button> <button>Yes, Delete</button></div>`;
   const [cancel, yes] = back.querySelectorAll('button');
   cancel.onclick = () => back.remove();
-  yes.onclick = () => { back.remove(); ev.remove(); window.__DELETED = (window.__DELETED || 0) + 1; };
+  yes.onclick = () => {
+    back.remove();
+    // simulate a confirm that Reddit silently rejects (HTTP 429 in the real thing)
+    if (currentRoom && currentRoom.alwaysFail) return;
+    if (currentRoom && currentRoom.failFirst && !ev.dataset.triedOnce) {
+      ev.dataset.triedOnce = '1';
+      return;
+    }
+    ev.remove();
+    window.__DELETED = (window.__DELETED || 0) + 1;
+  };
   document.body.appendChild(back);
 }
 
