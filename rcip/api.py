@@ -31,6 +31,7 @@ class AuthExpired(RuntimeError):
 @dataclass
 class Limits:
     max_retries: int = 6
+    max_reauths: int = 3          # hard stop, so no error can loop on re-auth
     backoff_s: float = 1.0
     min_interval_s: float = 0.0     # optional politeness delay between calls
 
@@ -43,6 +44,7 @@ class MatrixClient:
     on_reauth: object = None        # callable returning a fresh token
     _last_call: float = 0.0
     rate_limited: int = 0
+    reauths: int = 0
     calls: int = 0
 
     # ----------------------------------------------------------------- plumbing
@@ -87,10 +89,15 @@ class MatrixClient:
                     LOG.debug("rate limited; waiting %.1fs as instructed", wait)
                     time.sleep(min(wait, 60))
                     continue
-                if e.code in (401, 403) and payload.get("errcode") in (
-                        "M_UNKNOWN_TOKEN", "M_MISSING_TOKEN", "M_FORBIDDEN"):
-                    if self.on_reauth and attempt < self.limits.max_retries:
-                        LOG.warning("access token rejected; fetching a fresh one")
+                # Only these mean "your token is bad". M_FORBIDDEN means "you
+                # may not do this particular thing" - refusing one redaction is
+                # not an auth failure, and re-harvesting on it loops forever.
+                if payload.get("errcode") in ("M_UNKNOWN_TOKEN", "M_MISSING_TOKEN"):
+                    if self.on_reauth and self.reauths < self.limits.max_reauths:
+                        self.reauths += 1
+                        LOG.warning("access token rejected (%s); fetching a fresh one (%d/%d)",
+                                    payload.get("errcode"), self.reauths,
+                                    self.limits.max_reauths)
                         self.token = self.on_reauth()
                         continue
                     raise AuthExpired(payload.get("error", "token rejected"))

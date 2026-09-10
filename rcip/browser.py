@@ -46,19 +46,64 @@ class Browser:
         LOG.info("launching Chromium with profile %s (%s)", self.profile_dir,
                  "off-screen window" if self.hidden else "visible window")
         self._pw = sync_playwright().start()
-        self.context = self._pw.chromium.launch_persistent_context(
-            user_data_dir=str(self.profile_dir),
-            headless=False,          # Reddit chat renders nothing when headless
-            viewport={"width": 1440, "height": 950},
-            args=args,
-        )
+        try:
+            self.context = self._launch(args)
+        except PlaywrightError as exc:
+            if "already in use" not in str(exc) and "existing browser session" not in str(exc):
+                raise
+            # A hidden window from an interrupted run can outlive it and keep
+            # the profile locked. It is our own browser on our own profile, so
+            # clear it and try once more rather than failing with Playwright's
+            # rather opaque message.
+            orphan = self._browser_pid()
+            if orphan is None:
+                raise RuntimeError(
+                    f"the profile {self.profile_dir} is locked by another Chromium "
+                    "that we cannot find. Close it, or quit Chromium, and retry."
+                ) from exc
+            LOG.warning("a browser from an earlier run (pid %d) still holds this "
+                        "profile; closing it", orphan)
+            self._kill(orphan)
+            self.context = self._launch(args)
         self.page = self.context.pages[0] if self.context.pages else self.context.new_page()
         self.page.set_default_timeout(15_000)
         if self.hidden:
             self._hide_window()
         return self
 
+    def _launch(self, args: list[str]):
+        return self._pw.chromium.launch_persistent_context(
+            user_data_dir=str(self.profile_dir),
+            headless=False,          # Reddit chat renders nothing when headless
+            viewport={"width": 1440, "height": 950},
+            args=args,
+        )
+
+    @staticmethod
+    def _kill(pid: int) -> None:
+        import os
+        import signal
+        import time
+        for sig in (signal.SIGTERM, signal.SIGKILL):
+            try:
+                os.kill(pid, sig)
+            except ProcessLookupError:
+                return
+            except PermissionError:
+                LOG.warning("not allowed to close pid %d; close it yourself and retry", pid)
+                return
+            for _ in range(20):
+                time.sleep(0.25)
+                try:
+                    os.kill(pid, 0)
+                except ProcessLookupError:
+                    return
+
     def __exit__(self, *exc) -> None:
+        # Capture the pid before closing: a hidden window sometimes survives
+        # context.close(), and an orphan holding the profile blocks every
+        # later run.
+        pid = self._browser_pid()
         for closer in (getattr(self.context, "close", None), getattr(self._pw, "stop", None)):
             try:
                 if closer:
@@ -66,6 +111,18 @@ class Browser:
             except Exception as e:                      # pragma: no cover
                 LOG.debug("teardown error: %s", e)
         self.context = self._pw = self.page = None
+        if pid is not None and self._running(pid):
+            LOG.debug("browser pid %d outlived close(); ending it", pid)
+            self._kill(pid)
+
+    @staticmethod
+    def _running(pid: int) -> bool:
+        import os
+        try:
+            os.kill(pid, 0)
+            return True
+        except OSError:
+            return False
 
     def is_alive(self) -> bool:
         try:

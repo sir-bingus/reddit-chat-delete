@@ -271,6 +271,8 @@ def _summary(args, counts, store, client, kind) -> None:
         LOG.info("  %-33s: %d", label,
                  counts.deleted if args.execute else counts.would_delete)
         LOG.info("  %-33s: %d", "already gone", counts.already_gone)
+        if counts.refused:
+            LOG.info("  %-33s: %d", "refused by Reddit", counts.refused)
     if counts.rooms_hidden:
         LOG.info("  %-33s: %d", "conversations left/hidden", counts.rooms_hidden)
     LOG.info("  %-33s: %d", "failures", counts.failed)

@@ -43,6 +43,7 @@ class Counters:
     would_delete: int = 0
     failed: int = 0
     already_gone: int = 0
+    refused: int = 0
 
 
 class Runner:
@@ -182,6 +183,17 @@ class Runner:
                 if "M_NOT_FOUND" in msg or "not found" in msg.lower():
                     self.store.set_status(room.room_id, target.event_id, GONE)
                     self.counts.already_gone += 1
+                    continue
+                # Reddit refusing this particular message: record it and move
+                # on. Retrying cannot help, and it is not an auth problem.
+                if "M_FORBIDDEN" in msg or "403" in msg:
+                    self.store.set_status(room.room_id, target.event_id, FAILED,
+                                          "refused by Reddit (M_FORBIDDEN)")
+                    self.counts.refused += 1
+                    LOG.info("    Reddit refused to delete %s; skipping it",
+                             target.event_id[:16])
+                    self.audit.write("target", outcome="refused", room=room.room_id,
+                                     event_id=target.event_id, msgtype=target.msgtype)
                     continue
                 self.store.set_status(room.room_id, target.event_id, FAILED, msg)
                 self.counts.failed += 1
