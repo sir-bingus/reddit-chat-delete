@@ -83,7 +83,10 @@ store2.save()
 store3 = Store(tmp / "s.json")
 api3, r3 = runner_for(store3, tmp)
 r3.run(["!a:x", "!b:x"], kind=None, hide=True, hide_require=Kind.MESSAGES)
-check("sequential: hide leaves both once clean", sorted(api3.left), ["!a:x", "!b:x"])
+check("sequential: both conversations are empty afterwards",
+      all(store3.rooms[r].is_clean(Kind.msgtypes(Kind.MESSAGES)) for r in ("!a:x", "!b:x")),
+      True)
+check("sequential: nothing is left, since Reddit refuses it", api3.left, [])
 
 # --- hide --require images must be honoured ----------------------------------
 tmp = base / "req"; tmp.mkdir(parents=True)
@@ -93,13 +96,7 @@ store.save()
 store2 = Store(tmp / "s.json")
 api2, r2 = runner_for(store2, tmp)
 r2.run(["!a:x"], kind=None, hide=True, hide_require=Kind.IMAGES)
-check("hide --require images: hides though text remains", api2.left, ["!a:x"])
-
-store3 = Store(tmp / "s.json")
-store3.room("!a:x").hidden = False
-api3, r3 = runner_for(store3, tmp)
-r3.run(["!a:x"], kind=None, hide=True, hide_require=Kind.MESSAGES)
-check("hide --require messages: refuses while text remains", api3.left, [])
+check("hide never leaves a room while unsupported", api2.left, [])
 
 # --- protected list applies to all three -------------------------------------
 for label, kind, hide in (("images", Kind.IMAGES, False),

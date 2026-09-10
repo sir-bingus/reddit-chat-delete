@@ -62,14 +62,16 @@ check("dry run leaves everything pending",
       all(t.status == "pending" for t in store.rooms["!r:x"].targets.values()), True)
 check("dry run still counts what it would do", r.counts.would_delete, 6)
 
-# hide gating differs by kind
+# Cleanliness is judged per kind. (Acting on it - leaving the conversation -
+# is disabled because Reddit refuses it; see HIDE_SUPPORTED.)
 api, store, r = run(Kind.IMAGES, tmp=tmp / "d")
 room = store.rooms["!r:x"]
-check("hide --require images: allowed once attachments are gone",
-      r.hide_room(room, Kind.IMAGES), True)
-api, store, r = run(Kind.IMAGES, tmp=tmp / "e")
-check("hide --require messages: refused while text remains",
-      r.hide_room(store.rooms["!r:x"], Kind.MESSAGES), False)
+check("clean of attachments after an images run",
+      room.is_clean(Kind.msgtypes(Kind.IMAGES)), True)
+check("not clean of everything: text remains",
+      room.is_clean(Kind.msgtypes(Kind.MESSAGES)), False)
+check("hide refuses regardless, since Reddit will not allow it",
+      r.hide_room(room, Kind.IMAGES), False)
 
 print("\n" + ("FAILED: " + ", ".join(fails) if fails else "all kind checks passed"))
 sys.exit(1 if fails else 0)

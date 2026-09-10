@@ -23,7 +23,7 @@ import sys
 from pathlib import Path
 
 from rcip.api import Limits, MatrixClient
-from rcip.auth import get_token, save_cached
+from rcip.auth import get_token
 from rcip.config import load_skip_list, normalize_user
 from rcip.logging_setup import LOG, Audit, configure, new_run
 from rcip.runner import Options, Runner
@@ -84,7 +84,7 @@ def build_parser() -> argparse.ArgumentParser:
     subs.add_parser("messages", parents=[parent],
                     help="remove every message you sent, attachments included")
     h = subs.add_parser("hide", parents=[parent],
-                        help="leave conversations that have nothing of yours left")
+                        help="(NOT SUPPORTED - Reddit refuses to leave chat rooms)")
     h.add_argument("--require", choices=[Kind.IMAGES, Kind.MESSAGES], default=Kind.MESSAGES,
                    help="what must already be gone before hiding "
                         "(default: everything you sent)")
@@ -119,6 +119,13 @@ def main(argv=None) -> int:
     skip = load_skip_list(args.skip_users if args.skip_users.exists() else None)
     skip |= {normalize_user(s) for s in args.skip}
 
+    if args.command == "hide":
+        LOG.error("Hiding is not supported. Reddit's API refuses to leave a chat room "
+                  "(403 M_FORBIDDEN, \"You cannot leave this room\"), and exposes no room "
+                  "tags or account data we could use instead. Whatever the web UI's hide "
+                  "button does, it is not something this tool can reach yet.")
+        return 2
+
     if args.command == "nuke":
         return _nuke(args, skip, paths, audit, store)
 
@@ -145,10 +152,14 @@ def main(argv=None) -> int:
                             hidden=not args.show_window, force=args.fresh_token)
 
     def reauth() -> str:
-        """Called when the server rejects our token mid-run."""
-        fresh, fresh_base = get_token(args.profile, args.token_cache,
-                                      hidden=not args.show_window, force=True)
-        save_cached(args.token_cache, fresh, fresh_base)
+        """Called when the server rejects our token mid-run.
+
+        get_token caches what it harvests, so do not cache it again here:
+        two writers racing on one temp path is what produced a stray
+        FileNotFoundError against an unrelated message.
+        """
+        fresh, _ = get_token(args.profile, args.token_cache,
+                             hidden=not args.show_window, force=True)
         return fresh
 
     client = MatrixClient(token, base, Limits(min_interval_s=args.min_interval),
@@ -209,8 +220,7 @@ def _nuke(args, skip, paths, audit, store) -> int:
     protected = f"{len(skip)} protected user(s) will be left alone" if skip else \
                 "NO protected users are configured - nothing is exempt"
     LOG.info("=" * 70)
-    LOG.info("NUKE - scan, delete every message you sent%s",
-             "" if args.keep_conversations else ", then leave every conversation")
+    LOG.info("NUKE - scan, then delete every message you sent")
     LOG.info("%s", protected)
     LOG.info("=" * 70)
 
@@ -229,7 +239,9 @@ def _nuke(args, skip, paths, audit, store) -> int:
 
     phases = [("scan", None, False), ("messages", Kind.MESSAGES, False)]
     if not args.keep_conversations:
-        phases.append(("hide", None, True))
+        LOG.warning("hiding conversations is not supported (Reddit refuses to leave "
+                    "chat rooms), so this will delete everything but leave the "
+                    "conversations in your list")
 
     for name, kind, hide in phases:
         LOG.info("")
@@ -273,8 +285,12 @@ def _summary(args, counts, store, client, kind) -> None:
         LOG.info("  %-33s: %d", "already gone", counts.already_gone)
         if counts.refused:
             LOG.info("  %-33s: %d", "refused by Reddit", counts.refused)
-    if counts.rooms_hidden:
-        LOG.info("  %-33s: %d", "conversations left/hidden", counts.rooms_hidden)
+    if counts.rooms_clean:
+        LOG.info("  %-33s: %d", "already clean, nothing to do", counts.rooms_clean)
+    if counts.rooms_hidden or counts.would_hide:
+        LOG.info("  %-33s: %d", "conversations left/hidden" if args.execute
+                 else "conversations that WOULD be left",
+                 counts.rooms_hidden if args.execute else counts.would_hide)
     LOG.info("  %-33s: %d", "failures", counts.failed)
     LOG.info("  %-33s: %d / %d", "API calls / rate-limit waits",
              client.calls, client.rate_limited)

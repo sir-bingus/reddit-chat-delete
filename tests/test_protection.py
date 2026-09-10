@@ -17,12 +17,14 @@ def check(name, got, want):
 
 class FakeAPI:
     """Records redactions instead of performing them."""
-    def __init__(self): self.redacted = []; self.calls = 0; self.rate_limited = 0
+    def __init__(self):
+        self.redacted, self.left = [], []
+        self.calls = self.rate_limited = 0
     def redact(self, room, event_id, reason=None):
         self.redacted.append((room, event_id)); return "$r"
     def members(self, room): raise AssertionError("should not re-fetch members")
     def iter_messages(self, room): raise AssertionError("should not re-page history")
-    def leave(self, room): pass
+    def leave(self, room): self.left.append(room)
     def forget(self, room): pass
 
 
@@ -61,14 +63,16 @@ api, store, runner = build(set(), [], tmp / "d")
 runner.run(["!r:x"], Kind.IMAGES, hide=False)
 check("no protected list means no restriction", len(api.redacted), 1)
 
-# hide must refuse while anything of yours remains
+# hide refuses while content remains - and, for now, refuses regardless
 api, store, runner = build(set(), ["bob"], tmp / "e")
 store.room("!r:x").targets["$img"].status = "pending"
 runner.opts.execute = True
-hid = runner.hide_room(store.room("!r:x"), Kind.MESSAGES)
-check("will not hide a conversation that still has your content", hid, False)
+check("will not hide a conversation that still has your content",
+      runner.hide_room(store.room("!r:x"), Kind.MESSAGES), False)
 store.room("!r:x").targets["$img"].status = "deleted"
-check("hides once it is clean", runner.hide_room(store.room("!r:x"), Kind.MESSAGES), True)
+check("still refuses once clean: Reddit does not permit leaving",
+      runner.hide_room(store.room("!r:x"), Kind.MESSAGES), False)
+check("nothing was left", api.left, [])
 
 print("\n" + ("FAILED: " + ", ".join(fails) if fails else "all protection checks passed"))
 sys.exit(1 if fails else 0)

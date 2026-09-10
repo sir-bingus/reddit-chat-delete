@@ -21,6 +21,13 @@ from .logging_setup import LOG, Audit
 from .store import DELETED, FAILED, GONE, Store, Target
 from .targets import Kind, deletable, msgtype_of
 
+# Reddit's gateway rejects the Matrix leave endpoint on every chat room with
+# 403 M_FORBIDDEN "You cannot leave this room", and implements neither room
+# tags nor any account_data we could find for it. Whatever the web UI's "hide"
+# does, it is not Matrix leave/forget, so this stays off until we know what it
+# actually calls. Verified against the live API on 2026-09-10.
+HIDE_SUPPORTED = False
+
 
 @dataclass
 class Options:
@@ -37,7 +44,9 @@ class Counters:
     rooms_seen: int = 0
     rooms_skipped: int = 0
     rooms_scanned: int = 0
+    rooms_clean: int = 0
     rooms_hidden: int = 0
+    would_hide: int = 0
     events_read: int = 0
     deleted: int = 0
     would_delete: int = 0
@@ -215,8 +224,13 @@ class Runner:
             LOG.debug("  not hiding %s: still has %d item(s) of yours",
                       room.room_id[:20], len(room.pending(Kind.msgtypes(kind))))
             return False
+        if not HIDE_SUPPORTED:
+            self.counts.failed += 1
+            LOG.warning("  cannot hide: Reddit refuses to leave chat rooms")
+            return False
         if not self.opts.execute:
-            LOG.info("  [dry run] would leave and hide this conversation")
+            self.counts.would_hide += 1
+            LOG.debug("  [dry run] would leave and hide this conversation")
             self.audit.write("room_hide", room=room.room_id, outcome="would-hide")
             return False
         try:
@@ -276,9 +290,15 @@ class Runner:
 
             who = ", ".join(room.participants) or "(unknown)"
             pending = len(room.pending(Kind.msgtypes(kind))) if kind else 0
-            LOG.info("[%d/%d] u/%-24s %s", index, total, who[:24],
-                     f"{pending} {Kind.describe(kind)} pending" if kind
-                     else f"{len(room.targets)} of your messages on record")
+            # Only announce conversations with work in them. Logging a line for
+            # every one made a purely local pass look like network activity.
+            line = (f"{pending} {Kind.describe(kind)} pending" if kind
+                    else f"{len(room.targets)} of your messages on record")
+            if pending or hide:
+                LOG.info("[%d/%d] u/%-24s %s", index, total, who[:24], line)
+            else:
+                self.counts.rooms_clean += 1
+                LOG.debug("[%d/%d] u/%s %s", index, total, who[:24], line)
 
             if kind:
                 self.delete_in(room, kind)

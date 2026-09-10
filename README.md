@@ -42,9 +42,8 @@ Check what is left at any point, without touching the network:
 ./.venv/bin/python main.py nuke --execute
 ```
 
-Scans, deletes every message you have ever sent, then leaves every conversation.
-It asks you to type `DELETE EVERYTHING` first. Add `--keep-conversations` to
-delete but stay in them.
+Scans and deletes every message you have ever sent. It asks you to type
+`DELETE EVERYTHING` first.
 
 ---
 
@@ -55,24 +54,19 @@ delete but stay in them.
 | `scan` | Reads every conversation and records what is there. Changes nothing. |
 | `images` | Deletes attachments you sent: images, video, files, audio. |
 | `messages` | Deletes every message you sent, attachments included. |
-| `hide` | Leaves conversations that have nothing of yours left. |
+| `hide` | **Not supported** - see below. |
 | `status` | Prints what is known and what remains. No network calls. |
-| `nuke` | `scan` then `messages` then `hide`, behind a confirmation prompt. |
+| `nuke` | `scan` then `messages`, behind a confirmation prompt. |
 
 They share one record of what has been done, so they compose freely:
 
 ```bash
 ./.venv/bin/python main.py images   --execute    # attachments first
 ./.venv/bin/python main.py messages --execute    # then the text
-./.venv/bin/python main.py hide     --execute    # then leave the empty ones
 ```
 
 The second run does not redo the first one's work, and stopping with Ctrl-C then
 restarting picks up where it left off.
-
-`images` and `messages` accept `--then-hide` to leave each conversation as soon
-as it is clean. `hide` on its own takes `--require images|messages` to say what
-must already be gone (default: everything you sent).
 
 ### Options
 
@@ -177,6 +171,24 @@ jq -r 'select(.event=="room_skipped") | .reason' reports/*/audit.jsonl | sort | 
 ```
 
 ---
+
+## Hiding conversations is not supported
+
+Emptying a conversation does not remove it from your chat list, and this tool
+cannot remove it either. Reddit's API rejects the Matrix leave endpoint on every
+chat room:
+
+```
+403 M_FORBIDDEN  "You cannot leave this room"
+```
+
+It also implements no room tags and exposes no account data that marks a chat as
+hidden, so there is nothing else to set. Whatever the web UI's hide button does,
+it is not reachable through the API this tool uses. The `hide` command therefore
+refuses to run and explains why, rather than failing on every conversation.
+
+If you want conversations gone from your list, hide them in the Reddit UI. Their
+contents will already be empty.
 
 ## Requirements and limitations
 

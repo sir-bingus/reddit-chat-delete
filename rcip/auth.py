@@ -100,7 +100,8 @@ def save_cached(cache: Path, token: str, base: str) -> None:
         return
     try:
         cache.parent.mkdir(parents=True, exist_ok=True)
-        tmp = cache.with_suffix(".tmp")
+        # unique per process: two runs saving at once must not share a path
+        tmp = cache.with_suffix(f".{os.getpid()}.tmp")
         tmp.write_text(json.dumps({"token": token, "base": base,
                                    "acquired": int(time.time())}), encoding="utf-8")
         os.chmod(tmp, 0o600)
