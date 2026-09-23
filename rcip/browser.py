@@ -11,6 +11,8 @@ import platform
 import subprocess
 from pathlib import Path
 
+import psutil
+
 from playwright.sync_api import Error as PlaywrightError
 from playwright.sync_api import sync_playwright
 
@@ -81,23 +83,21 @@ class Browser:
 
     @staticmethod
     def _kill(pid: int) -> None:
-        import os
-        import signal
-        import time
-        for sig in (signal.SIGTERM, signal.SIGKILL):
+        """End a browser process: politely, then firmly. Works on every OS."""
+        try:
+            proc = psutil.Process(pid)
+            proc.terminate()
             try:
-                os.kill(pid, sig)
-            except ProcessLookupError:
-                return
-            except PermissionError:
-                LOG.warning("not allowed to close pid %d; close it yourself and retry", pid)
-                return
-            for _ in range(20):
-                time.sleep(0.25)
-                try:
-                    os.kill(pid, 0)
-                except ProcessLookupError:
-                    return
+                proc.wait(timeout=5)
+            except psutil.TimeoutExpired:
+                proc.kill()
+                proc.wait(timeout=5)
+        except psutil.NoSuchProcess:
+            pass
+        except psutil.AccessDenied:
+            LOG.warning("not allowed to close pid %d; close it yourself and retry", pid)
+        except psutil.TimeoutExpired:
+            LOG.warning("pid %d would not exit; close it yourself and retry", pid)
 
     def __exit__(self, *exc) -> None:
         # Capture the pid before closing: a hidden window sometimes survives
@@ -117,11 +117,11 @@ class Browser:
 
     @staticmethod
     def _running(pid: int) -> bool:
-        import os
+        # Not os.kill(pid, 0): on Windows that terminates the process instead
+        # of probing it.
         try:
-            os.kill(pid, 0)
-            return True
-        except OSError:
+            return psutil.Process(pid).is_running()
+        except psutil.Error:
             return False
 
     def is_alive(self) -> bool:
@@ -140,20 +140,28 @@ class Browser:
     # ------------------------------------------------------------ hiding
 
     def _browser_pid(self) -> int | None:
-        """The Chromium process owning our profile, not its helpers."""
-        try:
-            out = subprocess.run(["ps", "-Ao", "pid,command"], capture_output=True,
-                                 text=True, timeout=10).stdout
-        except Exception as exc:
-            LOG.debug("ps failed: %s", exc)
-            return None
-        needle = f"--user-data-dir={self.profile_dir}"
-        for line in out.splitlines():
-            if needle in line and "Helper" not in line:
-                try:
-                    return int(line.split()[0])
-                except ValueError:
-                    continue
+        """The main Chromium process using our profile.
+
+        Chromium's helpers (renderer, GPU, ...) share the --user-data-dir
+        argument but carry --type=...; the browser process itself does not.
+        """
+        target = str(self.profile_dir.resolve())
+        for proc in psutil.process_iter(["pid", "cmdline"]):
+            try:
+                args = proc.info.get("cmdline") or []
+            except psutil.Error:
+                continue
+            if any(a.startswith("--type=") for a in args):
+                continue
+            for a in args:
+                if a.startswith("--user-data-dir="):
+                    given = a.split("=", 1)[1]
+                    try:
+                        same = Path(given).resolve() == Path(target)
+                    except OSError:
+                        same = given == target
+                    if same:
+                        return proc.info["pid"]
         return None
 
     def _hide_window(self) -> None:
@@ -163,7 +171,10 @@ class Browser:
         option; the window genuinely has to be hidden by the OS.
         """
         if platform.system() != "Darwin":
-            LOG.warning("hiding the window is only implemented on macOS; it stays visible")
+            # Expected, not a problem: only macOS lets us hide it. The window
+            # closes by itself once the token is picked up.
+            LOG.info("the browser window will be visible for a few seconds "
+                     "(hiding it is only possible on macOS)")
             return
         pid = self._browser_pid()
         if pid is None:

@@ -2,7 +2,7 @@
 
     scan   - look at conversations and record what is there
     delete - remove recorded targets of a given kind
-    hide    - leave conversations that have nothing of yours left
+    hide   - hide conversations that have nothing of yours left
 
 Deliberately shaped so nothing is done twice: `delete` never pages history
 itself, it works from what `scan` recorded, and `hide` decides from the same
@@ -36,6 +36,7 @@ class Options:
     max_deletes: int | None = None
     rescan: bool = False          # re-page history even if we scanned before
     rescan_after_s: int = 0       # treat scans older than this as stale (0 = never)
+    save_every_s: float = 3.0     # how often progress is written to the record
 
 
 @dataclass
@@ -63,6 +64,7 @@ class Runner:
         self.opts = opts
         self.me = me
         self.counts = Counters()
+        self._last_save = time.monotonic()
 
     # ------------------------------------------------------------------ scan
 
@@ -88,8 +90,12 @@ class Runner:
             # protected only while at least one of those names is still listed
             return any(normalize_user(n) in self.opts.skip_users for n in names)
         if room.skipped == "unidentified":
-            # only while we still cannot say who is in it and a list is in force
-            return bool(self.opts.skip_users) and not room.participants
+            # Nothing was recorded for these, so the only way to find out who
+            # is in them now is to look again: always let them through to be
+            # rescanned. The scan re-applies the same rule, so a chat that is
+            # still unidentifiable is skipped again - but one that has become
+            # identifiable is no longer stuck.
+            return False
         return True
 
     def _allowed(self, room) -> bool:
@@ -240,7 +246,7 @@ class Runner:
             return False
         if not self.opts.execute:
             self.counts.would_hide += 1
-            LOG.debug("  [dry run] would leave and hide this conversation")
+            LOG.debug("  [dry run] would hide this conversation")
             self.audit.write("room_hide", room=room.room_id, outcome="would-hide")
             return False
         try:
@@ -324,7 +330,11 @@ class Runner:
             if hide:
                 self.hide_room(room, hide_require or kind or Kind.MESSAGES)
 
-            if index % 25 == 0:
+            # Save by time rather than every N chats: a crash then loses at most
+            # a few seconds of progress. The record is a couple of MB, so saving
+            # after every single chat would be a lot of pointless writing.
+            if time.monotonic() - self._last_save >= self.opts.save_every_s:
                 self.store.save()
+                self._last_save = time.monotonic()
         self.store.save()
         return self.counts

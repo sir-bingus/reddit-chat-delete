@@ -9,7 +9,7 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 from rcip.logging_setup import Audit, configure, new_run
 from rcip.runner import Options, Runner
-from rcip.store import Store, Target, DELETED, FAILED, GONE, PENDING
+from rcip.store import Store, Target, DELETED, FAILED, GONE
 from rcip.targets import Kind
 
 fails = []
@@ -93,6 +93,50 @@ api2, store2, r2 = make(tmp, skip={"bob"})
 store2.rooms = store.rooms
 r2.run(["!a:x"], Kind.MESSAGES, hide=False)
 check("still protected while the name remains listed", api2.redacted, [])
+
+# an unidentifiable chat is looked at again, and processed once identifiable
+class Anon(API):
+    def __init__(self, known):
+        super().__init__()
+        self.known = known
+    def members(self, room):
+        return {"@them:x": "bob"} if self.known else {}
+
+tmp = base / "f"; tmp.mkdir(parents=True)
+store = Store(tmp / "s.json")
+paths = new_run(tmp / "r"); configure(paths, quiet=True)
+api = Anon(known=False)
+Runner(api, store, Audit(paths.audit_file),
+       Options(execute=True, skip_users={"someone"}), me="@me:x").run(["!a:x"], Kind.MESSAGES, hide=False)
+check("unidentifiable chat skipped", store.rooms["!a:x"].skipped, "unidentified")
+check("nothing deleted in it", api.redacted, [])
+api2 = Anon(known=True)
+Runner(api2, store, Audit(paths.audit_file),
+       Options(execute=True, skip_users={"someone"}), me="@me:x").run(["!a:x"], Kind.MESSAGES, hide=False)
+check("rescanned next run once members are known", api2.scanned, ["!a:x"])
+check("and then processed", len(api2.redacted), 1)
+
+# a crash mid-run keeps what was already done
+class Crashy(API):
+    def redact(self, room, event_id, reason=None):
+        if len(self.redacted) == 3:
+            raise SystemExit("simulated crash")
+        return super().redact(room, event_id)
+
+tmp = base / "g"; tmp.mkdir(parents=True)
+store = Store(tmp / "s.json")
+for i in range(6):
+    store.record_scan(f"!r{i}:x", ["bob"], 1, [Target(f"$e{i}", "m.text", i)])
+store.save()
+paths = new_run(tmp / "r"); configure(paths, quiet=True)
+runner = Runner(Crashy(), store, Audit(paths.audit_file),
+                Options(execute=True, save_every_s=0), me="@me:x")
+try:
+    runner.run([f"!r{i}:x" for i in range(6)], Kind.MESSAGES, hide=False)
+except SystemExit:
+    pass                       # no clean shutdown, no final save
+on_disk = Store(tmp / "s.json")
+check("work done before a crash is on disk", on_disk.summary()["deleted"], 3)
 
 print("\n" + ("FAILED: " + ", ".join(fails) if fails else "all rerun checks passed"))
 sys.exit(1 if fails else 0)

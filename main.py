@@ -1,19 +1,17 @@
 #!/usr/bin/env python3
-"""Clean up your own content in Reddit chat.
+"""Delete your own messages and attachments from Reddit chat.
 
-Four commands, one shared engine and one shared record of what has been done:
+    python main.py scan        read your chats and record what you sent (changes nothing)
+    python main.py status      show what is left, from the record (no network)
+    python main.py images      delete attachments you sent
+    python main.py messages    delete every message you sent, attachments included
+    python main.py hide        hide chats that have nothing of yours left
+    python main.py nuke        scan, delete everything, hide everything
 
-    python main.py scan                    take stock, delete nothing
-    python main.py images                  remove attachments you sent
-    python main.py messages                remove every message you sent
-    python main.py hide                    leave conversations already clean
-    python main.py status                  what is left, without touching the network
+Nothing changes unless you add --execute.
 
-Every command is a dry run unless you pass --execute.
-
-Deleting is permanent: Reddit's own wording is "removed for everyone in this
-chat, you can't undo this". Leaving a conversation is visible to the other
-person and cannot be undone either.
+Deleting is permanent and removes the message for everyone in the chat.
+Hiding only affects your own chat list, and you can unhide from Reddit.
 """
 
 from __future__ import annotations
@@ -74,7 +72,7 @@ def build_parser() -> argparse.ArgumentParser:
     g.add_argument("-v", "--verbose", action="count", default=0)
     g.add_argument("-q", "--quiet", action="store_true")
 
-    p = argparse.ArgumentParser(prog="reddit-chat-cleanup", description=__doc__,
+    p = argparse.ArgumentParser(prog="reddit-chat-delete", description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
     subs = p.add_subparsers(dest="command", required=True)
     subs.add_parser("scan", parents=[parent],
@@ -94,7 +92,7 @@ def build_parser() -> argparse.ArgumentParser:
         del sp
         subs.choices[name].add_argument(
             "--then-hide", action="store_true",
-            help="after a conversation is clean, leave and hide it")
+            help="hide each chat as soon as nothing of yours is left in it")
     subs.add_parser("status", parents=[parent],
                     help="summarise the stored records; makes no network calls")
     n = subs.add_parser("nuke", parents=[parent],
@@ -103,7 +101,7 @@ def build_parser() -> argparse.ArgumentParser:
     n.add_argument("--yes", action="store_true",
                    help="skip the typed confirmation (for unattended runs)")
     n.add_argument("--keep-conversations", action="store_true",
-                   help="delete everything but do not leave/hide the conversations")
+                   help="delete everything but leave the chats in your list")
     return p
 
 
@@ -133,7 +131,7 @@ def main(argv=None) -> int:
     if kind:
         LOG.info("targeting: %s you sent", Kind.describe(kind))
     if hide:
-        LOG.info("will leave conversations once they are clean")
+        LOG.info("will hide chats once nothing of yours is left in them")
     if changing and not skip:
         LOG.warning("no protected users configured - every conversation is in scope")
     LOG.info("=" * 70)
@@ -176,7 +174,7 @@ def main(argv=None) -> int:
 
     if args.command == "hide":
         # Hiding never scans on its own: it acts on what we already know, so
-        # you cannot accidentally leave a conversation we have not examined.
+        # you cannot accidentally hide a conversation we have not examined.
         known = [r for r in rooms if store.rooms.get(r) and store.rooms[r].scanned_at]
         if len(known) < len(rooms):
             LOG.warning("%d conversation(s) have never been scanned and will be left "
@@ -282,8 +280,8 @@ def _summary(args, counts, store, client, kind) -> None:
     if counts.rooms_clean:
         LOG.info("  %-33s: %d", "already clean, nothing to do", counts.rooms_clean)
     if counts.rooms_hidden or counts.would_hide:
-        LOG.info("  %-33s: %d", "conversations left/hidden" if args.execute
-                 else "conversations that WOULD be left",
+        LOG.info("  %-33s: %d", "chats hidden" if args.execute
+                 else "chats that WOULD be hidden",
                  counts.rooms_hidden if args.execute else counts.would_hide)
     LOG.info("  %-33s: %d", "failures", counts.failed)
     LOG.info("  %-33s: %d / %d", "API calls / rate-limit waits",

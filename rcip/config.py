@@ -16,6 +16,20 @@ def normalize_user(name: str) -> str:
     return name.strip().lstrip("@").removeprefix("u/").removeprefix("U/").strip().lower()
 
 
+def _read_text(path: Path) -> str:
+    """Read a text file whatever editor wrote it.
+
+    Windows editors often add a byte-order mark. Left in, it sticks to the
+    first username - "bob" becomes "\\ufeffbob" - which then never matches,
+    so that person would silently lose their protection. Notepad's "Unicode"
+    option writes UTF-16, which would not decode as UTF-8 at all.
+    """
+    data = path.read_bytes()
+    if data.startswith((b"\xff\xfe", b"\xfe\xff")):
+        return data.decode("utf-16")
+    return data.decode("utf-8-sig")
+
+
 def load_skip_list(path: Path | None) -> set[str]:
     """Usernames to leave completely alone. Case-insensitive, `u/` optional."""
     names: set[str] = set()
@@ -24,7 +38,7 @@ def load_skip_list(path: Path | None) -> set[str]:
     if not path.exists():
         LOG.warning("protected-user list %s does not exist - NO users are protected", path)
         return names
-    for raw in path.read_text(encoding="utf-8").splitlines():
+    for raw in _read_text(path).splitlines():
         line = raw.split("#", 1)[0].strip()
         if line:
             names.add(normalize_user(line))

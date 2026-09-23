@@ -27,8 +27,7 @@ class API:
         return "$r"
     def members(self, r): raise AssertionError
     def iter_messages(self, r): raise AssertionError
-    def leave(self, r): pass
-    def forget(self, r): pass
+    def set_hidden(self, r, hidden=True): pass
 
 
 def run(error, tmp):
@@ -65,7 +64,7 @@ api, store, r = run(None, base / "d")
 check("success: deleted", r.counts.deleted, 1)
 
 # the client must cap re-auths so nothing can loop on them
-from rcip.api import Limits, MatrixClient
+from rcip.api import Limits
 lim = Limits()
 check("client caps re-auth attempts", hasattr(lim, "max_reauths") and lim.max_reauths <= 3, True)
 src = (ROOT / "rcip" / "api.py").read_text()

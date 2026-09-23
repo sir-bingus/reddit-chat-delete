@@ -1,14 +1,17 @@
-*.pyc
-.browser-profile/
-.profiles/
-.session-token.json
+# created by install.py
 .venv/
-__pycache__/
+
+# your Reddit login and session: never commit these
+.browser-profile/
+.session-token.json
+.session-token.*.tmp
+
+# your data
+skip_users.txt
 chat-records.json
 chat-records.json.lock
+chat-records.json.tmp
 reports/
-rooms.json
-selectors.local.json
-skip_users.txt
-state-*.json
-state.json
+
+__pycache__/
+*.pyc

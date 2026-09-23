@@ -181,28 +181,3 @@ class MatrixClient:
             return bool(self.request("GET", path).get("hidden"))
         except Exception:
             return False
-
-    def leave(self, room: str) -> None:
-        """Not usable on Reddit chat: the server answers 403 'You cannot leave
-        this room'. Kept only so the distinction stays visible."""
-        self.request("POST", f"/_matrix/client/v3/rooms/{urllib.parse.quote(room, safe='')}/leave",
-                     body={})
-
-    def forget(self, room: str) -> None:
-        self.request("POST", f"/_matrix/client/v3/rooms/{urllib.parse.quote(room, safe='')}/forget",
-                     body={})
-
-
-def members_from_events(events: list[dict]) -> dict[str, str]:
-    """Usernames gleaned from membership events already in a timeline page.
-
-    Saves a call per conversation when we do not need an authoritative list.
-    """
-    out = {}
-    for ev in events:
-        if ev.get("type") == "m.room.member":
-            uid = ev.get("state_key")
-            name = (ev.get("content") or {}).get("displayname")
-            if uid and name:
-                out[uid] = name
-    return out

@@ -19,16 +19,33 @@ processes can share one file without losing each other's work.
 
 from __future__ import annotations
 
-import fcntl
 import json
 import os
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from .filelock import FileLock
 from .logging_setup import LOG
 
 SCHEMA_VERSION = 1
+
+
+def _replace(src: Path, dst: Path, attempts: int = 20) -> None:
+    """os.replace, retried briefly.
+
+    On Windows a replace fails while anything else has the destination open -
+    another run reading the record, or an antivirus scanner - so a save could
+    be lost to a momentary clash. Elsewhere it succeeds the first time.
+    """
+    for i in range(attempts):
+        try:
+            os.replace(src, dst)
+            return
+        except PermissionError:
+            if i == attempts - 1:
+                raise
+            time.sleep(0.05)
 
 # What a target's `status` can be.
 PENDING = "pending"    # still there as far as we know
@@ -141,31 +158,27 @@ class Store:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         lock = self.path.with_suffix(self.path.suffix + ".lock")
         try:
-            with open(lock, "a+") as lf:
-                fcntl.flock(lf.fileno(), fcntl.LOCK_EX)
-                try:
-                    disk = {}
-                    if self.path.exists():
-                        try:
-                            d = json.loads(self.path.read_text(encoding="utf-8"))
-                            if d.get("version") == SCHEMA_VERSION:
-                                disk = d.get("rooms") or {}
-                        except Exception:
-                            disk = {}
-                    merged = dict(disk)
-                    for rid, room in self.rooms.items():
-                        merged[rid] = room.to_json()   # ours is newer
-                    payload = {
-                        "version": SCHEMA_VERSION,
-                        "account": self.account,
-                        "updated": time.strftime("%Y-%m-%dT%H:%M:%S"),
-                        "rooms": merged,
-                    }
-                    tmp = self.path.with_suffix(self.path.suffix + ".tmp")
-                    tmp.write_text(json.dumps(payload, indent=1), encoding="utf-8")
-                    os.replace(tmp, self.path)
-                finally:
-                    fcntl.flock(lf.fileno(), fcntl.LOCK_UN)
+            with FileLock(lock):
+                disk = {}
+                if self.path.exists():
+                    try:
+                        d = json.loads(self.path.read_text(encoding="utf-8"))
+                        if d.get("version") == SCHEMA_VERSION:
+                            disk = d.get("rooms") or {}
+                    except Exception:
+                        disk = {}
+                merged = dict(disk)
+                for rid, room in self.rooms.items():
+                    merged[rid] = room.to_json()   # ours is newer
+                payload = {
+                    "version": SCHEMA_VERSION,
+                    "account": self.account,
+                    "updated": time.strftime("%Y-%m-%dT%H:%M:%S"),
+                    "rooms": merged,
+                }
+                tmp = self.path.with_suffix(self.path.suffix + ".tmp")
+                tmp.write_text(json.dumps(payload, indent=1), encoding="utf-8")
+                _replace(tmp, self.path)
         except Exception as exc:
             LOG.warning("could not save the store: %s", exc)
 
